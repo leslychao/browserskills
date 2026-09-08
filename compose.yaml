@@ -1,0 +1,175 @@
+name: browserskills
+
+x-browser: &browser
+  image: browserskills-browser:${BROWSERSKILLS_RELEASE:-0.1.0}
+  build:
+    context: .
+    dockerfile: apps/browser/Dockerfile
+  init: true
+  restart: unless-stopped
+  read_only: true
+  shm_size: 1gb
+  mem_limit: 1536m
+  cpus: 1.5
+  pids_limit: 256
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+    - seccomp:./ops/seccomp-profile.json
+  tmpfs:
+    - /tmp:size=268435456,mode=1777
+    - /run/browser:size=268435456,uid=1001,gid=1001,mode=0700
+  logging:
+    driver: local
+    options: {max-size: '5m', max-file: '2'}
+
+services:
+  api:
+    image: browserskills-api:${BROWSERSKILLS_RELEASE:-0.1.0}
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    tmpfs: [/tmp:size=268435456,mode=1777]
+    ports: ['${BROWSERSKILLS_BIND_IP:-127.0.0.1}:8443:8443']
+    environment:
+      BROWSERSKILLS_DB_URL: jdbc:postgresql://postgres:5432/browserskills
+      BROWSERSKILLS_DB_USERNAME: browserskills
+      BROWSERSKILLS_PUBLIC_ORIGIN: ${BROWSERSKILLS_PUBLIC_ORIGIN:-https://127.0.0.1:8443}
+      API_WORKER_1_URL: http://browser-1:3000
+      API_WORKER_2_URL: http://browser-2:3000
+      API_WORKER_3_URL: http://browser-3:3000
+      API_WORKER_4_URL: http://browser-4:3000
+      API_WORKER_5_URL: http://browser-5:3000
+      API_INFERENCE_URL: http://inference:8080
+      API_MODEL_SHA256: ${API_MODEL_SHA256:-unverified}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError
+    secrets: [db_password, api_cert, api_key, worker_1_token, worker_2_token, worker_3_token, worker_4_token, worker_5_token]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [database, inference, worker1, worker2, worker3, worker4, worker5]
+    logging:
+      driver: local
+      options: {max-size: '10m', max-file: '3'}
+
+  postgres:
+    image: postgres:17.9-bookworm@sha256:47f917f7409eacd22fc5dfb1dee634e1b55cf0c01d1a7eb701be2227a03e0641
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 128
+    environment:
+      POSTGRES_DB: browserskills
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command: [postgres, -c, log_statement=none, -c, log_min_duration_statement=-1, -c, log_min_error_statement=panic, -c, max_connections=30]
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./ops/postgres/init.sh:/docker-entrypoint-initdb.d/10-browserskills.sh:ro
+    secrets: [postgres_password, db_password]
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U postgres -d browserskills]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    logging:
+      driver: local
+      options: {max-size: '5m', max-file: '2'}
+
+  inference:
+    image: browserskills-inference:${BROWSERSKILLS_RELEASE:-0.1.0}
+    build: {context: ., dockerfile: ops/inference/Dockerfile, target: runtime}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 10g
+    cpus: 4
+    pids_limit: 256
+    tmpfs: [/tmp:size=268435456,mode=1777]
+    volumes: [models:/models:ro]
+    networks: [inference]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+    logging:
+      driver: local
+      options: {max-size: '1m', max-file: '2'}
+
+  model-prepare:
+    profiles: [tools]
+    image: browserskills-converter:${BROWSERSKILLS_RELEASE:-0.1.0}
+    build: {context: ., dockerfile: ops/inference/Dockerfile, target: converter}
+    mem_limit: 16g
+    cpus: 4
+    pids_limit: 256
+    volumes: [models:/models]
+    networks: [download]
+
+  browser-1:
+    <<: *browser
+    environment: {WORKER_ID: browser-1, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
+    volumes: [profile1:/data/profile]
+    secrets: [{source: worker_1_token, target: worker_token}]
+    networks: [worker1]
+  browser-2:
+    <<: *browser
+    environment: {WORKER_ID: browser-2, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
+    volumes: [profile2:/data/profile]
+    secrets: [{source: worker_2_token, target: worker_token}]
+    networks: [worker2]
+  browser-3:
+    <<: *browser
+    environment: {WORKER_ID: browser-3, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
+    volumes: [profile3:/data/profile]
+    secrets: [{source: worker_3_token, target: worker_token}]
+    networks: [worker3]
+  browser-4:
+    <<: *browser
+    environment: {WORKER_ID: browser-4, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
+    volumes: [profile4:/data/profile]
+    secrets: [{source: worker_4_token, target: worker_token}]
+    networks: [worker4]
+  browser-5:
+    <<: *browser
+    environment: {WORKER_ID: browser-5, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
+    volumes: [profile5:/data/profile]
+    secrets: [{source: worker_5_token, target: worker_token}]
+    networks: [worker5]
+
+networks:
+  database: {internal: true}
+  inference: {internal: true}
+  worker1: {}
+  worker2: {}
+  worker3: {}
+  worker4: {}
+  worker5: {}
+  download: {}
+volumes:
+  postgres: {}
+  models: {}
+  profile1: {}
+  profile2: {}
+  profile3: {}
+  profile4: {}
+  profile5: {}
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  db_password: {file: ./secrets/db_password}
+  api_cert: {file: ./secrets/api_cert}
+  api_key: {file: ./secrets/api_key}
+  worker_1_token: {file: ./secrets/worker_1_token}
+  worker_2_token: {file: ./secrets/worker_2_token}
+  worker_3_token: {file: ./secrets/worker_3_token}
+  worker_4_token: {file: ./secrets/worker_4_token}
+  worker_5_token: {file: ./secrets/worker_5_token}

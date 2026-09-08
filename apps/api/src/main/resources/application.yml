@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: browserskills-api
+  config:
+    import: optional:configtree:/run/secrets/
+  datasource:
+    url: ${BROWSERSKILLS_DB_URL:jdbc:postgresql://postgres:5432/browserskills}
+    username: ${BROWSERSKILLS_DB_USERNAME:browserskills}
+    password: ${db_password:${BROWSERSKILLS_DB_PASSWORD:}}
+    hikari:
+      maximum-pool-size: 12
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+server:
+  address: ${BROWSERSKILLS_BIND_ADDRESS:0.0.0.0}
+  port: ${BROWSERSKILLS_PORT:8443}
+  ssl:
+    enabled: true
+    certificate: ${BROWSERSKILLS_TLS_CERTIFICATE:/run/secrets/api_cert}
+    certificate-private-key: ${BROWSERSKILLS_TLS_PRIVATE_KEY:/run/secrets/api_key}
+  servlet:
+    session:
+      timeout: 1h
+      cookie:
+        name: BROWSERSKILLS_SESSION
+        http-only: true
+        secure: true
+        same-site: lax
+      tracking-modes: cookie
+  error:
+    include-message: never
+    include-stacktrace: never
+  tomcat:
+    max-http-form-post-size: 32KB
+    threads:
+      max: 40
+    connection-timeout: 10s
+logging:
+  level:
+    root: WARN
+    io.browserskills: INFO
+    org.springframework.web: WARN
+    org.springframework.security: WARN
+    org.apache.hc: OFF
+    jdk.httpclient: OFF
+api:
+  public-origin: ${BROWSERSKILLS_PUBLIC_ORIGIN:https://192.168.0.107:8443}
+  inference-url: ${API_INFERENCE_URL:http://inference:8080}
+  daily-quota: ${BROWSERSKILLS_DAILY_QUOTA:100}
+  workers:
+    1: ${API_WORKER_1_URL:http://browser-1:3000}
+    2: ${API_WORKER_2_URL:http://browser-2:3000}
+    3: ${API_WORKER_3_URL:http://browser-3:3000}
+    4: ${API_WORKER_4_URL:http://browser-4:3000}
+    5: ${API_WORKER_5_URL:http://browser-5:3000}
