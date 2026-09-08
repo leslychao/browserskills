@@ -109,7 +109,8 @@ try{
   for(const login of ['alice','bob','carol','david','eve'])await command(java,['-jar',jar,'--spring.main.web-application-type=none','--spring.profiles.active=admin',`--create-user=${login}`],environment,password+'\n');
   const api=child(java,['-jar',jar,'--spring.profiles.active=dev',`--server.port=${apiPort}`,`--api.public-origin=http://127.0.0.1:${webPort}`],environment);
   await waitHttp(`http://127.0.0.1:${apiPort}/health/live`,api);
-  const vite=child(process.execPath,['node_modules/vite/bin/vite.js','apps/web','--host','127.0.0.1','--port',String(webPort),'--strictPort'],environment);
+  await command(process.execPath,['node_modules/vite/bin/vite.js','build','apps/web'],environment);
+  const vite=child(process.execPath,['node_modules/vite/bin/vite.js','preview','apps/web','--host','127.0.0.1','--port',String(webPort),'--strictPort'],environment);
   await waitHttp(`http://127.0.0.1:${webPort}`,vite);
   process.stdout.write('Fixture system ready: real PostgreSQL + Spring + Chromium; stub model.\n');
   const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_URL:`http://127.0.0.1:${webPort}`,SYSTEM_PASSWORD:password,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});

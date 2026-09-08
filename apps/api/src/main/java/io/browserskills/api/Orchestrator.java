@@ -288,6 +288,7 @@ public class Orchestrator {
   }
 
   private void releaseWorker(UUID user, UUID run, String generation) {
+    refreshed.remove(run);
     try {
       worker.command(
           store.user(user).workerId(),

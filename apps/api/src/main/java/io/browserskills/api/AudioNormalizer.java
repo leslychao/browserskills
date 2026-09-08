@@ -27,6 +27,8 @@ public class AudioNormalizer {
                   "quiet",
                   "-protocol_whitelist",
                   "file,pipe",
+                  "-format_whitelist",
+                  "wav,mp3,ogg,matroska,webm,flac,mov,aac",
                   "-i",
                   input.toString(),
                   "-vn",
@@ -67,7 +69,13 @@ public class AudioNormalizer {
       throw new ApiException(
           502, "AUDIO_UNAVAILABLE", "Audio cannot be normalized without modifying its duration.");
     } finally {
-      if (process != null && process.isAlive()) process.destroyForcibly();
+      if (process != null && process.isAlive()) {
+        boolean interrupted=Thread.interrupted();
+        process.destroyForcibly();
+        try { process.waitFor(5,TimeUnit.SECONDS); }
+        catch(InterruptedException ignored) { interrupted=true; }
+        finally { if(interrupted)Thread.currentThread().interrupt(); }
+      }
       if (directory != null) {
         try {
           Files.deleteIfExists(directory.resolve("original"));

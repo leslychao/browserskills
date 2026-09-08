@@ -6,9 +6,10 @@ test('real noVNC, Spring proxy and Docker x11vnc connect; automation and logout 
   await page.getByRole('button',{name:'Открыть браузер',exact:true}).click();await expect(page.getByText('Браузер готов',{exact:true})).toBeVisible({timeout:30_000});
   const socketOpened=page.waitForEvent('websocket',socket=>socket.url().endsWith('/api/browser/view'));
   await page.getByRole('button',{name:'Открыть Яндекс',exact:true}).click();const socket=await socketOpened;
-  await expect(page.getByText('Ручное управление',{exact:true})).toBeVisible({timeout:20_000});
+  await expect(page.getByRole('region',{name:'Ваш браузер Яндекса'})).toContainText('Ручное управление',{timeout:20_000});
   await expect(page.locator('.remote-screen canvas')).toHaveJSProperty('width',1366);
   await expect(page.locator('.remote-screen canvas')).toHaveJSProperty('height',768);
+  await page.screenshot({path:'artifacts/ui-rfb.png',fullPage:true});
   const other=await browser.newContext({baseURL:process.env.SYSTEM_URL});
   try{
     const csrf=await(await other.request.get('/api/auth/csrf')).json();expect((await other.request.post('/api/auth/login',{headers:{[csrf.headerName]:csrf.token},data:{login:'alice',password:process.env.SYSTEM_PASSWORD}})).status()).toBe(200);
@@ -19,6 +20,6 @@ test('real noVNC, Spring proxy and Docker x11vnc connect; automation and logout 
   await page.getByRole('button',{name:'Стоп',exact:true}).click();await expect(page.getByText('Остановлен',{exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Открыть браузер',exact:true}).click();await expect(page.getByText('Браузер готов',{exact:true})).toBeVisible({timeout:30_000});
   const reopened=page.waitForEvent('websocket',event=>event.url().endsWith('/api/browser/view'));await page.getByRole('button',{name:'Открыть Яндекс',exact:true}).click();const second=await reopened;
-  await expect(page.getByText('Ручное управление',{exact:true})).toBeVisible({timeout:20_000});const logoutClosed=second.waitForEvent('close');await page.getByRole('button',{name:'Выйти',exact:true}).click();await logoutClosed;
+  await expect(page.getByRole('region',{name:'Ваш браузер Яндекса'})).toContainText('Ручное управление',{timeout:20_000});const logoutClosed=second.waitForEvent('close');await page.getByRole('button',{name:'Выйти',exact:true}).click();await logoutClosed;
   await expect(page.getByRole('heading',{name:'Войти в BrowserSkills',exact:true})).toBeVisible();
 });

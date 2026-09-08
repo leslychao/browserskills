@@ -22,7 +22,7 @@ export class BrowserOwner extends EventEmitter {
   private runId:string|null=null;
   private epoch=0;
   private tail:Promise<unknown>=Promise.resolve();
-  private readonly commands=new Map<string,{hash:string;result:Promise<unknown>}>();
+  private readonly commands=new Map<string,{hash:string;type:WorkerCommand['type'];result:Promise<unknown>|null}>();
   private manualTimer:NodeJS.Timeout|null=null;
   constructor(private readonly options:OwnerOptions){super();this.media=new MediaStore(options.mediaDir);}
 
@@ -34,7 +34,7 @@ export class BrowserOwner extends EventEmitter {
 
   command(command:WorkerCommand):Promise<unknown>{
     const hash=sha256(JSON.stringify(command));const existing=this.commands.get(command.id);
-    if(existing){if(existing.hash!==hash)return Promise.reject(new WorkerError('IDEMPOTENCY_CONFLICT'));return existing.result;}
+    if(existing){if(existing.hash!==hash)return Promise.reject(new WorkerError('IDEMPOTENCY_CONFLICT'));return existing.result??Promise.reject(new WorkerError('COMMAND_EXPIRED'));}
     if(this.commands.size>=512){const first=this.commands.keys().next().value;if(first)this.commands.delete(first);}
     const epoch=this.epoch;
     // STOP/CLOSE bypass the queue to cancel a click that is still waiting for actionability.
@@ -45,7 +45,11 @@ export class BrowserOwner extends EventEmitter {
       result=this.tail.catch(()=>undefined).then(()=>{if(epoch!==this.epoch)throw new WorkerError('STALE_GENERATION');return this.execute(command);});
       this.tail=result;
     }
-    this.commands.set(command.id,{hash,result});return result;
+    this.commands.set(command.id,{hash,type:command.type,result});return result;
+  }
+  private expireSnapshots(exceptId?:string):void {
+    // Keep the idempotency tombstone, not instructions from completed/invalidated tasks.
+    for(const [id,entry] of this.commands)if(entry.type==='SNAPSHOT'&&id!==exceptId)entry.result=null;
   }
   private async execute(command:WorkerCommand):Promise<unknown>{
     switch(command.type){
@@ -61,7 +65,7 @@ export class BrowserOwner extends EventEmitter {
         const page=this.context.pages()[0]??await this.context.newPage();
         for(const extra of this.context.pages().slice(1))await extra.close();
         this.context.on('page',extra=>{if(extra!==page)void extra.close().catch(()=>undefined);});
-        this.context.on('close',()=>{if(this.context!==openedContext)return;this.epoch++;this.generation=randomUUID();this.revoke();this.context=null;this.adapter?.cancel();this.adapter=null;this.mode='CLOSED';this.runId=null;void this.media.clear();});
+        this.context.on('close',()=>{if(this.context!==openedContext)return;this.epoch++;this.generation=randomUUID();this.revoke();this.context=null;this.adapter?.cancel();this.adapter=null;this.mode='CLOSED';this.runId=null;this.expireSnapshots();this.tail=Promise.resolve();void this.media.clear();});
         page.on('dialog',dialog=>void dialog.dismiss().catch(()=>undefined));
         page.on('download',download=>void download.cancel().catch(()=>undefined));
         this.adapter=new FixedAdapter(page,this.media,this.options.profiles,{verificationTimeoutMs:this.options.verificationTimeoutMs});
@@ -84,14 +88,16 @@ export class BrowserOwner extends EventEmitter {
         if(this.mode==='AUTOMATION')throw new WorkerError('BROWSER_BUSY');
         if(!command.runId)throw new WorkerError('INVALID_COMMAND',400);
         this.revoke();this.mode='AUTOMATION';this.runId=command.runId;return this.status();
-      case 'SNAPSHOT':this.ensureRun(command);return this.adapter!.snapshot();
-      case 'SUBMIT':this.ensureRun(command);if(!command.payload)throw new WorkerError('INVALID_COMMAND',400);return this.adapter!.submit(command.payload);
+      case 'SNAPSHOT':this.ensureRun(command);this.expireSnapshots(command.id);return this.adapter!.snapshot();
+      case 'SUBMIT':this.ensureRun(command);if(!command.payload)throw new WorkerError('INVALID_COMMAND',400);this.expireSnapshots();return this.adapter!.submit(command.payload);
       default:throw new WorkerError('INVALID_COMMAND',400);
     }
   }
   async close():Promise<void>{
     this.epoch++;this.revoke();this.mode='CLOSED';this.runId=null;this.generation=randomUUID();
+    this.expireSnapshots();
     this.adapter?.cancel();this.adapter=null;const context=this.context;this.context=null;
-    await context?.close({reason:'Stopped by owner'}).catch(()=>undefined);await this.media.clear();
+    const closing=(async()=>{await context?.close({reason:'Stopped by owner'}).catch(()=>undefined);await this.media.clear();})();
+    this.tail=closing;await closing;
   }
 }

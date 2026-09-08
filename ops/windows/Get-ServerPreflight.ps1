@@ -40,6 +40,7 @@ $report = [ordered]@{
     freeRamGiB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
     gpu = $gpu
     localIpMatches = [bool](Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -EQ $ServerIp)
+    networkCategories = @(Get-NetConnectionProfile | Select-Object InterfaceIndex,NetworkCategory)
     freeDiskGiB = @(Get-Volume | Where-Object DriveLetter | ForEach-Object { @{ drive = $_.DriveLetter; freeGiB = [math]::Round($_.SizeRemaining / 1GB, 2) } })
     dockerReady = $dockerReady; docker = $dockerVersion; wsl = $wsl; containerGpu = $containerGpu
     listeningPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -In @(8443, 11434, 5432) | Select-Object LocalAddress,LocalPort,OwningProcess)

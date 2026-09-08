@@ -32,8 +32,9 @@ COPY --from=build /src/convert_hf_to_gguf.py /src/requirements.txt /conversion/
 COPY --from=build /src/conversion /conversion/conversion
 COPY --from=build /src/gguf-py /conversion/gguf-py
 COPY --from=build /src/requirements /conversion/requirements
-RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r /conversion/requirements/requirements-convert_hf_to_gguf.txt \
-    && /venv/bin/pip freeze > /conversion/python-packages.lock
+COPY ops/inference/conversion-requirements.lock /conversion/conversion-requirements.lock
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r /conversion/conversion-requirements.lock \
+    && /venv/bin/pip check && /venv/bin/pip freeze > /conversion/python-packages.lock
 COPY ops/inference/model.lock.json ops/inference/prepare_model.py /conversion/
 ENV HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
 ENTRYPOINT ["/venv/bin/python", "/conversion/prepare_model.py"]

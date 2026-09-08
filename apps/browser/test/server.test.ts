@@ -44,10 +44,12 @@ describe('worker HTTP, generation and manual control',()=>{
     const runId=randomUUID();expect((await command({type:'BEGIN',generation:first.generation!,runId})).status).toBe(200);
     expect((await command({type:'ENTER_MANUAL'})).status).toBe(409);
     expect((await command({type:'SNAPSHOT',generation:first.generation!,runId:randomUUID()})).status).toBe(409);
-    const snapshot=await(await command({type:'SNAPSHOT',generation:first.generation!,runId})).json() as TaskSnapshot;
+    const snapshotCommand={type:'SNAPSHOT' as const,id:randomUUID(),generation:first.generation!,runId};
+    const snapshot=await(await command(snapshotCommand)).json() as TaskSnapshot;
     expect(snapshot.taskId).toBe('task-1');
     const stop=await(await command({type:'STOP',generation:first.generation!,runId})).json() as BrowserStatus;
     expect(stop.mode).toBe('CLOSED');expect(stop.generation).not.toBe(first.generation);
+    expect(await(await command(snapshotCommand)).json()).toMatchObject({code:'COMMAND_EXPIRED'});
     expect((await command({type:'SNAPSHOT',generation:first.generation!,runId})).status).toBe(409);
   });
   it('revokes an already connected RFB input socket before automation begins',async()=>{
