@@ -18,7 +18,11 @@
 - Профиль Chromium сохранил cookies и localStorage после остановки и замены контейнера с TigerVNC: `.cache/profile-lifecycle/browserskills-profile-57c80e01-b4d2-4f98-8ec5-968af5da1b88/report.json`.
 - Docker API с тем же финальным backend прошёл проверку PostgreSQL, UID/read-only, HTTP, статических файлов, CSRF и общего пространства. Последующая правка frontend устранила лишний WebSocket и проверена финальным RFB-прогоном.
 
-API собран из `.cache/browser-r5-e74214c11bfa47a5847009947bd5ae79`; входные файлы и их хеши находятся в `release-inputs.json`. Подготовленные образы: API `sha256:0df96894dfaa0f365ec14707dd07b4020cc18e418735ad094c8e4349faa25efb`, browser `sha256:8ebb6052c8c7716a209c5e808af6cd3b02f602194156ea20776bf0dcd3a54cdd`. Модель и файл допуска категорий не меняются.
+Обновление на `http://192.168.0.107:8080` завершено **2026-09-09 в 09:15:03 UTC**. Активный Compose: `runtime/remote-107/71a2479ad7764a008143936e204f355c/yang-20260909T091302Z-1be09b41/compose.yang.json`; рядом `update.json` и согласованный `backup/`. Учтено параллельное обновление ручного управления: исходным был фактически применённый `manual-control-20260909T084818Z/compose.manual-control.json`. БД, исторические профили и веса сохранены; все компоненты UP/READY.
+
+API собран из `.cache/browser-r5-e74214c11bfa47a5847009947bd5ae79`; входные файлы и их хеши находятся в `release-inputs.json`. Фактически развёрнуты API `sha256:0df96894dfaa0f365ec14707dd07b4020cc18e418735ad094c8e4349faa25efb` и browser `sha256:8ebb6052c8c7716a209c5e808af6cd3b02f602194156ea20776bf0dcd3a54cdd`. В локальном RFB-отчёте `0de822…` обозначает config digest этого browser image. Inference остаётся `sha256:81ba0a06ee5e73a3ed6234c9d14fcd8f05c6d7e2ee4e4dbec24595b043a67a6b`; файл допуска категорий проверен и остаётся пустым.
+
+На настоящем `.107` прошёл отдельный UI smoke: общий workspace без логина, RFB-пиксели, native fullscreen, масштаб 1366 CSS-пикселей, оба поля clipboard, ноль ошибок API и отзыв живого сокета после освобождения. Отчёт: `runtime/remote-107/71a2479ad7764a008143936e204f355c/ui-smoke-1788945364609/report.json`. Unicode clipboard проверялся на собственной локальной странице с тем же образом; реальные поля Янг и буфер пользователя для этого не использовались. Ответов в Янг отправлено 0. После smoke обновлена пользовательская вкладка Chrome и оставлено рабочее подключение noVNC с новыми кнопками; состояние Янг — LOGIN_REQUIRED.
 
 ## Базовый релиз до обновления браузера
 
