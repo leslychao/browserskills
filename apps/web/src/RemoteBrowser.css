@@ -1,0 +1,20 @@
+.remote-browser{position:relative;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#18241f;margin:16px 0}
+.remote-browser .notice{margin:12px}
+.remote-title{display:flex;align-items:center;padding:12px 16px;color:#f4f5ed;font-size:12px;gap:12px;flex-wrap:wrap;flex-shrink:0}
+.remote-connection{display:flex;align-items:center;white-space:nowrap}
+.remote-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-left:auto}
+.remote-actions button,.remote-actions select{padding:8px 11px;border:1px solid #64776a;border-radius:7px;background:#283e32;color:#f4f5ed;font-size:12px;min-height:36px}
+.remote-actions button:hover{background:#3b5143}
+.remote-actions .clipboard-ready{border-color:#d1e7a0}
+.remote-actions select:focus-visible,.remote-actions button:focus-visible{outline:3px solid #d1e7a0;outline-offset:2px}
+.remote-viewport{position:relative;min-height:0;flex:1;overflow:hidden;display:flex;flex-direction:column}
+.remote-screen{height:min(75vh,800px);min-height:300px;flex:1;overflow:hidden}
+.remote-browser.expanded,.remote-browser:fullscreen{position:fixed;inset:0;z-index:1000;margin:0;width:100%;height:100dvh;border:0;border-radius:0;background:#18241f}
+.remote-browser.expanded .remote-screen,.remote-browser:fullscreen .remote-screen{height:100%;min-height:0}
+.remote-clipboard{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px;background:#f3f5ef;max-height:40vh;overflow:auto;flex-shrink:0}
+.remote-clipboard label{display:block;margin-bottom:6px;font-size:13px;font-weight:600}
+.remote-clipboard textarea{resize:vertical;min-height:80px;max-height:180px;width:100%;font:inherit;font-weight:400;border:1px solid var(--border);border-radius:7px;padding:10px;background:#fff;color:var(--ink)}
+.remote-clipboard button{margin-top:8px;font-size:12px;padding:8px 11px}
+.remote-clipboard p{margin-top:8px;font-size:12px;color:#526551}
+.remote-hint{font-size:12px;line-height:1.5;padding:8px 16px;color:#e0eacc;border-top:1px solid #405746;flex-shrink:0}
+@media(max-width:720px){.remote-title{padding:10px}.remote-actions{width:100%;justify-content:flex-start;margin-left:0;gap:6px}.remote-actions button,.remote-actions select{padding:8px;font-size:11px}.remote-clipboard{grid-template-columns:1fr;padding:12px;gap:12px;max-height:45vh}}

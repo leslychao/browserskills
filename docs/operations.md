@@ -4,15 +4,17 @@ The local first-start commands below run on the Windows server; the remote Docke
 
 The final 100-case synthetic evaluation on `.107` (RTX 3070) measured 88% text, 80% image, 100% speech and 28% sound/prosody accuracy. Text, image and sound/prosody failed the unchanged 90% quality gate; all measured latency gates passed, without inference errors. These diagnostics do not establish live-Yang acceptance. Exact measurements, historical `.109` results, conditions and outstanding checks are recorded in [verification](verification.md).
 
-The user corrected the service target to `https://yang.yandex-team.ru/?activeTab=all`. Source navigation/branding now uses Yang; the current `.107` images still precede this correction. Build, verify and publish updated images before claiming that the deployed OPEN action uses Yang. Corporate sign-in and one-time codes remain interactive; credentials must not be embedded in images or configuration.
+The service target is `https://yang.yandex-team.ru/?activeTab=all`. The autonomous Yang release has been deployed on `.107`; current image identities and acceptance results are recorded in [verification](verification.md). Corporate sign-in and one-time codes remain interactive; credentials must not be embedded in images or configuration.
 
 ## Remote Docker deployment used on .107
 
-The user explicitly selected LAN HTTP without certificates. The current endpoint is [BrowserSkills](http://192.168.0.107:8080). Authentication, CSRF, HttpOnly/SameSite session cookies and worker isolation remain enabled; HTTP traffic is plaintext on the selected LAN. No CA installation or certificate bypass is part of this deployment.
+The user explicitly selected LAN HTTP without certificates and subsequently chose one shared workspace without BrowserSkills authentication. The endpoint is [BrowserSkills](http://192.168.0.107:8080). Application sessions coordinate exclusive manual browser control; CSRF and HttpOnly/SameSite cookies remain. All application sessions see the same history and quota. Yang's own corporate login and second factor remain in the server browser. No CA installation or certificate bypass is required.
+
+The shared workspace reuses the existing assignment with the lowest worker number, preserving its history and Yang profile. An empty installation creates `local` automatically. Historical user rows, other profile volumes and protected operator credential archives are retained for data recovery and rollback; they no longer provide separate application logins. The earlier provisioning commands below document the existing installation and its recovery tools.
 
 The operator supplied the existing `tcp://192.168.0.107:2375` Docker endpoint. These scripts do not enable or reconfigure it, alter Windows settings, or stop another project. Local bind paths and Compose file secrets are replaced with separate named volumes on the selected daemon. The API receives its own secret volume, PostgreSQL another, and each worker only its own token. Files are transferred through an isolated temporary uploader, verified by SHA256 and restricted to the actual runtime UID (API 10001, browser 1001, PostgreSQL 999). Operator credentials remain in a protected local directory and never enter an image.
 
-For a new installation, first build the API/browser images, then run:
+The existing installation was prepared with these commands:
 
 ```powershell
 pwsh -NoProfile -File ops/windows/Get-RemotePreflight.ps1 -Endpoint tcp://192.168.0.107:2375 -OutputPath runtime/remote-107-preflight.json
@@ -83,7 +85,7 @@ The recipe identity uses canonical JSON, so Windows/Linux whitespace or line end
 
 Cross-request prompt and idle-slot caching are disabled (`--cache-ram 0`, `--no-cache-idle-slots`, `--no-cache-prompt`, and `cache_prompt:false` in requests). The API keeps original snapshot option IDs while the model sees a fresh bijection of random ten-letter lowercase aliases. The evaluator uses the same rule, preserves option labels/order and records each case's actual aliases in that order. Replaying with `--replay-aliases` requires the identical corpus SHA256, so diagnostic results can be reproduced without choosing a more favorable random mapping.
 
-The optional diagnostic generator below creates 100 synthetic cases from programmatic shapes/tones and an installed English Windows SAPI voice, including five 60-second audio boundary cases. It does not download audio, clone a voice or use model-generated expected answers. For acceptance of natural speech, environmental sounds, music and live tasks, supply a reviewed corpus reflecting the actual project.
+The optional diagnostic generator below creates 120 synthetic sets from programmatic shapes/tones and an installed English Windows SAPI voice, including five 60-second audio boundary cases and 20 composed sets. It does not download audio, clone a voice or use model-generated expected answers. For acceptance of natural speech, environmental sounds, music and live tasks, supply a reviewed corpus reflecting the actual project.
 
 Evaluate a labelled corpus through the actual running inference endpoint:
 
@@ -92,11 +94,11 @@ pwsh -NoProfile -File ops/windows/New-DiagnosticCorpus.ps1 -Destination artifact
 pwsh -NoProfile -File ops/windows/Invoke-ModelEvaluation.ps1 -CorpusDirectory artifacts/evaluation -OutputPath artifacts/evaluation-result.json
 ```
 
-The version2 diagnostic corpus contains `schemaVersion:2`, provenance/labelMethod and cases with `id`, category, instruction, ordered `parts:[{id,text,fields,media}]` and scoped `expected:[{partId,fieldId,value}]`. Fields use the production TaskField kinds. No `expectedOptionId` or one-choice response is accepted. Media paths stay inside the corpus directory; SHA256 and byte/audio budgets are validated. `--validate-only` does not call the model. The generator preserves100 original diagnostic questions and adds20 composed sets (30 per category); these synthetic labels do not establish production quality.
+The version 2 diagnostic corpus contains `schemaVersion:2`, provenance/labelMethod and cases with `id`, category, instruction, ordered `parts:[{id,text,fields,media}]` and scoped `expected:[{partId,fieldId,value}]`. Fields use the production TaskField kinds. No `expectedOptionId` or one-choice response is accepted. Media paths stay inside the corpus directory; SHA256 and byte/audio budgets are validated. `--validate-only` does not call the model. The generator preserves 100 original diagnostic questions and adds 20 composed sets (30 per category); these synthetic labels do not establish production quality.
 
-The Windows wrapper accepts at most128MiB/2000 corpus entries, rejects reparse points, streams into a unique temporary directory, removes the copy after evaluation and never overwrites reports or original audio. FFmpeg retains bounded mono16kPCM16WAV normalization. Context8192, request120s, selectedaudio120s and64MiB request material limits remain. `evaluate.py` reports whole-set exact accuracy, refusals as unsolved, measured latency/resources and `source=direct-model-diagnostic`, `productionPipeline=false`, `admissionEvidence=false`. It uses the canonical AnswerSet prompt with2048 output tokens. Its result cannot enable production categories.
+The Windows wrapper accepts at most 128 MiB/2000 corpus entries, rejects reparse points, streams into a unique temporary directory, removes the copy after evaluation and never overwrites reports or original audio. FFmpeg retains bounded mono 16k PCM16 WAV normalization. Context 8192, request 120 s, selected audio 120 s and 64 MiB request material limits remain. `evaluate.py` reports whole-set exact accuracy, refusals as unsolved, measured latency/resources and `source=direct-model-diagnostic`, `productionPipeline=false`, `admissionEvidence=false`. It uses the canonical AnswerSet prompt with 2048 output tokens. Its result cannot enable production categories.
 
-Production admission requires independently labelled whole sets executed through actual extraction, instruction preparation and answer stages, minimum25 per capability and90% wholly correct (allfields). Record predictions separately, then score them:
+Production admission requires independently labelled whole sets executed through actual extraction, instruction preparation and answer stages, minimum 25 per capability and 90% wholly correct (all fields). Record predictions separately, then score them:
 
 ```powershell
 python ops/inference/score_sets.py --corpus artifacts/labelled-sets.json --predictions artifacts/pipeline-predictions.json --output artifacts/whole-set-report.json --evidence-output artifacts/quality-evidence.json
@@ -170,7 +172,7 @@ pwsh -NoProfile -File ops/tests/Test-DeploymentRoundtrip.ps1 -ApiImage browsersk
 docker compose config --quiet
 ```
 
-These checks cover checksum rejection, bounded corpus validation, fail-closed model startup, score calculation, PowerShell parsing and a real PostgreSQL17 binary dump/copy/transactional restore roundtrip in uniquely named test containers. The PostgreSQL test removes only its newly created labelled containers/volumes; protected test artifacts remain under `runtime`. They do not prove clean-Windows reboot, live-Yandex or target `.107` performance; those require the corresponding deployment checks.
+These checks cover checksum rejection, bounded corpus validation, fail-closed model startup, score calculation, PowerShell parsing and a real PostgreSQL 17 binary dump/copy/transactional restore roundtrip in uniquely named test containers. The PostgreSQL test removes only its newly created labelled containers/volumes; protected test artifacts remain under `runtime`. They do not prove clean-Windows reboot, live-Yandex or target `.107` performance; those require the corresponding deployment checks.
 
 The deployment roundtrip requires prepared `browserskills-api:lan-http` and `browserskills-browser:local` images (override using `-ApiImage`/`-BrowserImage`). It resolves both tags to immutable image IDs, copies the actual Compose configuration and unchanged backup/restore scripts to isolated roots, publishes no ports, excludes model services/volume, and freezes copies of the current browser entrypoint and owned profile fixture before mounting them. The actual Spring API applies Flyway and provisions five accounts; SQL fixtures add completed history. Five real headed Chromium profiles receive distinct persistent HttpOnly cookies and localStorage at a local fixture origin.
 
@@ -192,4 +194,4 @@ $rfbTest = (Resolve-Path .cache/live-rfb.mjs).Path
 docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --security-opt "seccomp=$seccompPath" --shm-size=1g --mount "type=bind,source=$rfbTest,target=/app/live-rfb.mjs,readonly" --entrypoint node browserskills-browser:local /app/live-rfb.mjs
 ```
 
-It starts Xvfb, x11vnc and headed Chromium, exchanges the real RFB handshake, sends keyboard input and verifies navigation, then verifies that automation revokes the live manual-control socket. This was checked against the deterministic owned test surface; it is not evidence of authenticated Yandex compatibility or model quality.
+It starts TigerVNC and headed Chromium, exchanges the real RFB handshake, sends keyboard input and verifies navigation, then verifies that automation revokes the live manual-control socket. This was checked against the deterministic owned test surface; it is not evidence of authenticated Yandex compatibility or model quality.

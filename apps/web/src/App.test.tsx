@@ -8,29 +8,40 @@ vi.mock('./RemoteBrowser',()=>({RemoteBrowser:()=> <div>Экран браузе�
 afterEach(()=>vi.unstubAllGlobals());
 
 function clientMock(){
-  return {me:vi.fn().mockResolvedValue(user),browser:vi.fn().mockResolvedValue(browserStatus),catalogue:vi.fn().mockResolvedValue(catalogue),refreshCatalogue:vi.fn().mockResolvedValue(catalogue),selection:vi.fn().mockResolvedValue(selection),saveSelection:vi.fn().mockImplementation(async value=>value),runs:vi.fn().mockResolvedValue([]),run:vi.fn().mockResolvedValue(run),login:vi.fn().mockResolvedValue({id:user.id,login:user.login}),logout:vi.fn().mockResolvedValue(undefined),openBrowser:vi.fn().mockResolvedValue(browserStatus),enterManual:vi.fn().mockResolvedValue({...browserStatus,mode:'MANUAL'}),exitManual:vi.fn().mockResolvedValue(browserStatus),startRun:vi.fn().mockResolvedValue(run),resume:vi.fn().mockResolvedValue(run),stop:vi.fn().mockResolvedValue({...run,status:'STOPPED',current:null})};
+  const manualControl=vi.fn().mockResolvedValue({state:'AVAILABLE',expiresAt:null});
+  return {controlId:'tab-one',manualControl,me:vi.fn().mockResolvedValue(user),browser:vi.fn().mockResolvedValue(browserStatus),catalogue:vi.fn().mockResolvedValue(catalogue),refreshCatalogue:vi.fn().mockResolvedValue(catalogue),selection:vi.fn().mockResolvedValue(selection),saveSelection:vi.fn().mockImplementation(async value=>value),runs:vi.fn().mockResolvedValue([]),run:vi.fn().mockResolvedValue(run),openBrowser:vi.fn().mockResolvedValue(browserStatus),enterManual:vi.fn().mockImplementation(async()=>{manualControl.mockResolvedValue({state:'OWNED',expiresAt:null});return {...browserStatus,mode:'MANUAL'};}),exitManual:vi.fn().mockResolvedValue(browserStatus),startRun:vi.fn().mockResolvedValue(run),resume:vi.fn().mockResolvedValue(run),stop:vi.fn().mockResolvedValue({...run,status:'STOPPED',current:null})};
 }
 const show=(client:ReturnType<typeof clientMock>,pollInterval=100000)=>render(<App client={client as unknown as ApiClient} pollInterval={pollInterval}/>);
 const selectProject=async()=>userEvent.click(await screen.findByRole('radio',{name:'Сравнения аудио'}));
 describe('autonomous Yang workspace',()=>{
-  it('logs in and clears protected state on logout',async()=>{
-    const client=clientMock();client.me.mockRejectedValueOnce(new ClientError(401,'AUTH_REQUIRED','Войдите'));
-    show(client);
-    await screen.findByRole('heading',{name:'Войти в BrowserSkills'});
-    await userEvent.type(screen.getByLabelText('Логин'),'tester');
-    await userEvent.type(screen.getByLabelText('Пароль'),'password');
-    await userEvent.click(screen.getByRole('button',{name:'Войти'}));
+  it('does not open another tab controller and requires explicit takeover',async()=>{
+    const client=clientMock();client.browser.mockResolvedValue({...browserStatus,mode:'MANUAL'});
+    client.manualControl.mockResolvedValue({state:'IN_USE',expiresAt:null});show(client);
+    const takeover=await screen.findByRole('button',{name:'Перехватить управление'});
+    expect(screen.queryByText('Экран браузера')).toBeNull();expect(client.enterManual).not.toHaveBeenCalled();
+    await userEvent.click(takeover);await screen.findByText('Экран браузера');
+    expect(client.enterManual).toHaveBeenCalledWith(true);
+  });
+  it('removes the screen after another tab takes control without reacquiring it',async()=>{
+    const client=clientMock();client.browser.mockResolvedValue({...browserStatus,mode:'MANUAL'});
+    client.manualControl.mockResolvedValue({state:'OWNED',expiresAt:null});show(client,30);
+    await screen.findByText('Экран браузера');
+    client.manualControl.mockResolvedValue({state:'IN_USE',expiresAt:null});
+    await screen.findByRole('button',{name:'Перехватить управление'});
+    expect(screen.queryByText('Экран браузера')).toBeNull();expect(client.enterManual).not.toHaveBeenCalled();
+  });
+  it('opens the shared workspace without a login form or logout action',async()=>{
+    const client=clientMock();show(client);
     await screen.findByRole('heading',{name:'Яндекс Янг'});
-    expect(client.login).toHaveBeenCalledWith('tester','password');
-    await selectProject();
-    await userEvent.click(screen.getByRole('button',{name:'Выйти'}));
-    await screen.findByRole('heading',{name:'Войти в BrowserSkills'});
-    expect(screen.queryByText('Сравнения аудио')).toBeNull();
-    expect(client.logout).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText('Логин')).toBeNull();
+    expect(screen.queryByLabelText('Пароль')).toBeNull();
+    expect(screen.queryByRole('button',{name:'Выйти'})).toBeNull();
+    expect(screen.getByText('Общее пространство')).toBeTruthy();
   });
   it('connects Yang directly inside the server browser and observes OTP state without taking credentials',async()=>{
     const client=clientMock();client.browser.mockResolvedValue({...browserStatus,mode:'CLOSED',generation:null,yang:{...browserStatus.yang,state:'LOGIN_REQUIRED'}});
     client.enterManual.mockResolvedValue({...browserStatus,mode:'MANUAL',yang:{...browserStatus.yang,state:'TWO_FACTOR_REQUIRED',message:'Введите код в форме Яндекса'}});
+    client.manualControl.mockResolvedValue({state:'OWNED',expiresAt:null});
     show(client);
     await userEvent.click(await screen.findByRole('button',{name:'Подключить Янг'}));
     await screen.findByText('Экран браузера');
@@ -94,7 +105,7 @@ describe('autonomous Yang workspace',()=>{
   });
   it('waits for explicit resume after login and releases manual control first',async()=>{
     const client=clientMock();const paused={...run,status:'WAITING_FOR_AUTH',error:{code:'AUTH_EXPIRED',message:'Войдите в Янг снова'}};
-    client.runs.mockResolvedValue([paused]);client.run.mockResolvedValue(paused);client.browser.mockResolvedValue({...browserStatus,mode:'MANUAL'});show(client);
+    client.runs.mockResolvedValue([paused]);client.run.mockResolvedValue(paused);client.browser.mockResolvedValue({...browserStatus,mode:'MANUAL'});client.manualControl.mockResolvedValue({state:'OWNED',expiresAt:null});show(client);
     await screen.findByText('Войдите в Янг снова');
     expect(client.resume).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button',{name:'Продолжить'}));
@@ -108,12 +119,12 @@ describe('autonomous Yang workspace',()=>{
     await userEvent.click(within(screen.getByRole('navigation')).getAllByRole('button')[1]);
     await waitFor(()=>expect(client.run).toHaveBeenCalledWith('20000000-0000-4000-8000-000000000002'));
   });
-  it('clears protected content when session expires and dismisses action failures',async()=>{
+  it('shows service errors without returning to a login screen',async()=>{
     const client=clientMock();client.enterManual.mockRejectedValueOnce(new ClientError(409,'BUSY','Браузер занят')).mockRejectedValueOnce(new ClientError(401,'EXPIRED','Сессия истекла'));show(client);
     await userEvent.click(await screen.findByRole('button',{name:'Открыть Янг'}));await screen.findByText('Браузер занят');
     await userEvent.click(screen.getByRole('button',{name:'Закрыть сообщение'}));expect(screen.queryByText('Браузер занят')).toBeNull();
-    await userEvent.click(screen.getByRole('button',{name:'Открыть Янг'}));await screen.findByRole('heading',{name:'Войти в BrowserSkills'});
-    expect(screen.getByText('Сессия истекла')).toBeTruthy();expect(screen.queryByText('Сравнения аудио')).toBeNull();
+    await userEvent.click(screen.getByRole('button',{name:'Открыть Янг'}));await screen.findByText('Сессия истекла');
+    expect(screen.getByText('Сессия истекла')).toBeTruthy();expect(screen.getByRole('heading',{name:'Яндекс Янг'})).toBeTruthy();expect(screen.queryByLabelText('Пароль')).toBeNull();
   });
   it('shows startup connection failure without protected content',async()=>{
     const client=clientMock();client.me.mockRejectedValue(new ClientError(0,'NETWORK_ERROR','Сервер недоступен'));show(client);

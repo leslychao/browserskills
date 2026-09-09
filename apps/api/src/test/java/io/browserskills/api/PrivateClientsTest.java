@@ -177,6 +177,80 @@ class PrivateClientsTest {
   }
 
   @Test
+  void answerGrammarSeparatesRefusalAndConstrainsEachObservedFieldType() {
+    var model =
+        new InferenceClient(
+            Json.mapper(), mock(AudioNormalizer.class), mock(Materials.class), base);
+    var options =
+        List.of(
+            new Contracts.Option("option-a", "First"), new Contracts.Option("option-b", "Second"));
+    var fields =
+        List.of(
+            new Contracts.TaskField(
+                "choice", "Choose", "SINGLE_CHOICE", true, options, null, 0, null, null, null),
+            new Contracts.TaskField(
+                "multiple",
+                "Choose several",
+                "MULTI_CHOICE",
+                true,
+                options,
+                null,
+                0,
+                null,
+                null,
+                null),
+            new Contracts.TaskField(
+                "number", "Count", "NUMBER", true, List.of(), null, 0, null, 1.0, 7.0),
+            new Contracts.TaskField(
+                "text", "Describe", "TEXT", true, List.of(), null, 0, 80, null, null));
+    var part =
+        new Contracts.TaskPart("part-observed", "Title", "Material", List.of(), fields, List.of());
+    reply(envelope(new Contracts.AnswerSet("ABSTAIN", List.of(), "Unclear material")));
+    model.answer(
+        UUID.randomUUID(),
+        part,
+        fields,
+        new InstructionCompiler.Compiled("hash", List.of(), false),
+        List.of(),
+        Duration.ofSeconds(2));
+    // This is our generated outbound grammar, not an untrusted API/model response.
+    var body = tools.jackson.databind.json.JsonMapper.builder().build().readTree(requestBody.get());
+    var branches = body.path("response_format").path("json_schema").path("schema").path("anyOf");
+    assertEquals(2, branches.size());
+    var answer = branches.get(0).path("properties");
+    var refusal = branches.get(1).path("properties");
+    assertEquals("ANSWER", answer.path("decision").path("const").asString());
+    assertEquals(4, answer.path("answers").path("minItems").asInt());
+    assertEquals(4, answer.path("answers").path("maxItems").asInt());
+    assertEquals("ABSTAIN", refusal.path("decision").path("const").asString());
+    assertEquals(0, refusal.path("answers").path("maxItems").asInt(-1));
+    assertEquals(1, refusal.path("reason").path("minLength").asInt());
+    var choices = answer.path("answers").path("items").path("anyOf");
+    assertEquals(4, choices.size());
+    for (int i = 0; i < fields.size(); i++) {
+      var properties = choices.get(i).path("properties");
+      assertEquals(part.id(), properties.path("partId").path("const").asString());
+      assertEquals(fields.get(i).id(), properties.path("fieldId").path("const").asString());
+    }
+    var single = choices.get(0).path("properties").path("value");
+    assertEquals("string", single.path("type").asString());
+    assertEquals("option-a", single.path("enum").get(0).asString());
+    var multi = choices.get(1).path("properties").path("value");
+    assertEquals("array", multi.path("type").asString());
+    assertTrue(multi.path("uniqueItems").asBoolean());
+    assertEquals("option-b", multi.path("items").path("enum").get(1).asString());
+    assertEquals(1, multi.path("minItems").asInt());
+    var number = choices.get(2).path("properties").path("value");
+    assertEquals("number", number.path("type").asString());
+    assertEquals(1, number.path("minimum").asDouble());
+    assertEquals(7, number.path("maximum").asDouble());
+    var text = choices.get(3).path("properties").path("value");
+    assertEquals("string", text.path("type").asString());
+    assertEquals(80, text.path("maxLength").asInt());
+    assertTrue(body.path("messages").get(0).path("content").asString().contains("option IDs"));
+  }
+
+  @Test
   void oversizedSelectedMediaIsRejectedBeforeAnyBytesAreRead() {
     var materials = mock(Materials.class);
     var model = new InferenceClient(Json.mapper(), mock(AudioNormalizer.class), materials, base);

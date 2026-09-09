@@ -3,8 +3,8 @@ import { once } from 'node:events';
 import { wave } from '../../../tests/test-site/server.js';
 export type YangFixtureMode='normal'|'voices'|'aspects'|'opaque'|'unknown'|'lost'|'image'|'conditional'|'expired';
 /** Owned HTML fixture with Yang route/iframe boundaries. It does not prove production markup compatibility. */
-export async function startYangFixture(mode:YangFixtureMode='normal'){
-  const state={reservations:0,submissions:[] as string[],instruction:'Read every field and choose the correct answer.',instructionStatus:200,auth:'READY',suite:1,acknowledgement:'next' as 'next'|'complete'|'accepted'|'login'};
+export async function startYangFixture(mode:YangFixtureMode='normal',listen:{port?:number;host?:string}={}){
+  const state={reservations:0,submissions:[] as string[],instruction:'Read every field and choose the correct answer.',instructionStatus:200,auth:'READY',suite:1,clipboardText:'',clipboardCopies:0,clipboardVisits:0,clipboardReady:false,clipboardEvents:[] as string[],acknowledgement:'next' as 'next'|'complete'|'accepted'|'login'};
   const navigation='<nav><a href="/">Задания</a><a href="/profile">Профиль</a></nav><div role="radiogroup"><label role="radio"><input type="radio" value="all">Все</label><label role="radio"><input type="radio" value="active">В работе</label><label role="radio"><input type="radio" value="favourite">Избранное</label></div>';
   const pool=mode==='voices'?'94752008':mode==='aspects'?'94707463':'123';
   const choice=(legend:string,name='')=>`<fieldset><legend>${legend}</legend><label><input type="radio" ${name?`name="${name}"`:''} value="yes">Yes</label><label><input type="radio" ${name?`name="${name}"`:''} value="no">No</label></fieldset>`;
@@ -18,6 +18,24 @@ export async function startYangFixture(mode:YangFixtureMode='normal'){
   const server=createServer(async(request,response)=>{
     const url=new URL(request.url??'/','http://fixture');
     response.setHeader('Cache-Control','no-store');
+    if(url.pathname==='/clipboard-report'){
+      if(request.method==='POST'){
+        const chunks:Buffer[]=[];let length=0;for await(const chunk of request){length+=chunk.length;if(length>128*1024){response.writeHead(413);response.end();return;}chunks.push(Buffer.from(chunk));}
+        const value=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {text?:string;copied?:boolean;ready?:boolean;event?:string};if(typeof value.text==='string')state.clipboardText=value.text;if(value.copied)state.clipboardCopies++;if(value.ready)state.clipboardReady=true;if(value.event)state.clipboardEvents=[...state.clipboardEvents.slice(-19),value.event];
+      }
+      response.setHeader('Content-Type','application/json');response.end(JSON.stringify({text:state.clipboardText,copies:state.clipboardCopies,visits:state.clipboardVisits,ready:state.clipboardReady,events:state.clipboardEvents}));return;
+    }
+    if(url.pathname==='/clipboard'){
+      state.clipboardVisits++;state.clipboardReady=false;
+      response.setHeader('Content-Type','text/html; charset=utf-8');
+      response.end(`<!doctype html><html><title>Owned RFB clipboard fixture</title><body><h1>RFB clipboard fixture</h1><label>Remote source<textarea id="source" readonly autofocus rows="4" cols="70">Серверный Chromium: русский текст 😀\nSecond line: ёжик — готов.</textarea></label><label>Remote destination<textarea id="destination" rows="4" cols="70"></textarea></label><script>
+      const destination=document.querySelector('#destination');
+      destination.addEventListener('input',()=>fetch('/clipboard-report',{method:'POST',body:JSON.stringify({text:destination.value})}));
+      document.addEventListener('copy',()=>fetch('/clipboard-report',{method:'POST',body:JSON.stringify({copied:true})}));
+      document.addEventListener('keydown',e=>fetch('/clipboard-report',{method:'POST',body:JSON.stringify({event:e.key+' ctrl='+e.ctrlKey+' target='+e.target.id})}));
+      window.addEventListener('load',()=>{document.querySelector('#source').focus();fetch('/clipboard-report',{method:'POST',body:JSON.stringify({ready:true})});});
+      </script></body></html>`);return;
+    }
     if(url.pathname==='/audio.wav'){response.setHeader('Content-Type','audio/wav');response.end(wave());return;}
     if(url.pathname==='/image.png'){response.setHeader('Content-Type','image/png');response.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aC1sAAAAASUVORK5CYII=','base64'));return;}
     if(url.pathname==='/reserve'){state.reservations++;response.writeHead(302,{Location:`/task/${pool}/suite-${state.suite}`});response.end();return;}
@@ -42,6 +60,6 @@ export async function startYangFixture(mode:YangFixtureMode='normal'){
     const ongoing=url.searchParams.get('activeTab')==='active';if(ongoing&&state.reservations===0){response.end(`<!doctype html><body>${navigation}<p>Нет заданий в работе</p></body>`);return;}
     response.end(`<!doctype html><body>${navigation}<ul><li><h2>Fixture project</h2><span aria-label="${mode==='voices'||mode==='aspects'?'Аудио':mode==='image'?'Картинки':'Текст'}"></span><span>15,00</span><span> за задание</span><button id="instruction">Инструкция</button><button onclick="location.href='/reserve'">${ongoing?'Продолжить':'Приступить'}</button></li></ul><dialog aria-label="Инструкция"><button onclick="document.querySelector('dialog').close()">Закрыть</button><a href="/instructions/${pool}">Открыть в новой вкладке</a><button id="close">Закрыть</button></dialog><script>document.querySelector('#instruction').onclick=()=>document.querySelector('dialog').showModal();document.querySelector('#close').onclick=()=>document.querySelector('dialog').close();</script></body>`);
   });
-  server.listen(0,'127.0.0.1');await once(server,'listening');const url=`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+  server.listen(listen.port??0,listen.host??'127.0.0.1');await once(server,'listening');const url=`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
   return {url,pool,state,close:()=>new Promise<void>(resolve=>{server.closeAllConnections();server.close(()=>resolve());})};
 }

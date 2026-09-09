@@ -7,6 +7,7 @@ export class ClientError extends Error {
   constructor(public readonly status:number,public readonly code:string,message:string){super(message);this.name='ClientError';}
 }
 export class ApiClient {
+  readonly controlId=newRequestId();
   constructor(private readonly fetcher: typeof fetch = (...args)=>fetch(...args)) {}
   private async request<T>(path:string,schema:z.ZodType<T>,init:RequestInit={}):Promise<T> {
     let response:Response;
@@ -22,17 +23,16 @@ export class ApiClient {
     if(!parsed.success)throw new ClientError(502,'INVALID_RESPONSE','Сервер вернул неожиданный ответ. Обновите состояние перед дальнейшими действиями.');
     return parsed.data;
   }
-  private async change<T>(path:string,schema:z.ZodType<T>,body?:unknown,method='POST') {
-    const csrf=await this.request('/api/auth/csrf',z.object({token:z.string(),headerName:z.string()}));
-    return this.request(path,schema,{method,headers:{'Content-Type':'application/json',[csrf.headerName]:csrf.token},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  private async change<T>(path:string,schema:z.ZodType<T>,body?:unknown,method='POST',headers:Record<string,string>={}) {
+    const csrf=await this.request('/api/csrf',z.object({token:z.string(),headerName:z.string()}));
+    return this.request(path,schema,{method,headers:{'Content-Type':'application/json',[csrf.headerName]:csrf.token,...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});
   }
-  login(login:string,password:string){return this.change('/api/auth/login',z.object({id:z.string(),login:z.string()}),{login,password});}
-  logout(){return this.change('/api/auth/logout',z.void());}
   me(){return this.request('/api/me',MeSchema);}
   browser(){return this.request('/api/browser',BrowserStatusSchema);}
   openBrowser(){return this.change('/api/browser',BrowserStatusSchema);}
-  enterManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema);}
-  exitManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema,undefined,'DELETE');}
+  manualControl(){return this.request('/api/browser/manual-control',z.object({state:z.enum(['AVAILABLE','OWNED','IN_USE']),expiresAt:z.string().nullable()}),{headers:{'X-Browser-Control':this.controlId}});}
+  enterManual(takeOver=false){return this.change(`/api/browser/manual-control${takeOver?'?takeOver=true':''}`,BrowserStatusSchema,undefined,'POST',{'X-Browser-Control':this.controlId});}
+  exitManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema,undefined,'DELETE',{'X-Browser-Control':this.controlId});}
   yangSession(){return this.request('/api/yang/session',YangSessionSchema);}
   catalogue(){return this.request('/api/yang/catalogue',CatalogueSchema);}
   refreshCatalogue(){return this.change('/api/yang/catalogue/refresh',CatalogueSchema);}

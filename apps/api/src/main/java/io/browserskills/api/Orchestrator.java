@@ -99,7 +99,7 @@ public class Orchestrator {
   }
 
   public Contracts.BrowserStatus manual(
-      UUID user, String session, Instant expires, boolean acquire) {
+      UUID user, String session, Instant expires, boolean acquire, boolean takeOver) {
     var u = store.user(user);
     synchronized (lock(user)) {
       initialize(u.workerId());
@@ -108,7 +108,8 @@ public class Orchestrator {
           throw new ApiException(409, "RUN_ACTIVE", "Pause or stop the run first.");
         releaseOrphanedTerminalRun(u);
         var status = worker.status(u.workerId());
-        leases.acquire(user, u.workerId(), session, status.generation(), expires);
+        leases.reconcile(user, status);
+        leases.acquire(user, u.workerId(), session, status.generation(), expires, takeOver);
         try {
           return worker.command(
               u.workerId(),
@@ -129,50 +130,87 @@ public class Orchestrator {
     }
   }
 
-  public void logout(UUID user, String session) {
+  public ManualLeases.Status manualStatus(UUID user, String session) {
     synchronized (lock(user)) {
-      boolean owner = leases.valid(user, session);
-      leases.revokeSession(session);
-      if (owner)
-        try {
-          worker.command(
-              store.user(user).workerId(),
-              "EXIT_MANUAL",
-              null,
-              null,
-              null,
-              Contracts.BrowserStatus.class);
-        } catch (Exception ignored) {
-        }
+      leases.reconcile(user, browser(user, false));
+      return leases.status(user, session);
     }
   }
 
   public Contracts.YangSession session(UUID user) {
     var u = store.user(user);
     initialize(u.workerId());
-    return worker.command(
-        u.workerId(), "YANG_SESSION", null, null, null, Contracts.YangSession.class);
+    try {
+      return worker.command(
+          u.workerId(), "YANG_SESSION", null, null, null, Contracts.YangSession.class);
+    } catch (ApiException e) {
+      if (!e.code().equals("BROWSER_CLOSED")) throw e;
+      return new Contracts.YangSession("UNKNOWN", clock.instant(), null, null, null);
+    }
   }
 
   public Contracts.Catalogue catalogue(UUID user, boolean refresh) {
     var u = store.user(user);
-    initialize(u.workerId());
-    if (refresh && !store.manualAllowed(user))
-      throw new ApiException(409, "RUN_ACTIVE", "Catalogue refresh is available between runs.");
-    if (refresh) blockedProjects.remove(user);
-    if (!refresh && catalogues.containsKey(user)) return catalogues.get(user);
-    var c =
-        decorate(
-            user,
-            worker.command(
-                u.workerId(),
-                "CATALOGUE",
-                null,
-                null,
-                Map.of("refresh", refresh),
-                Contracts.Catalogue.class));
-    catalogues.put(user, c);
-    return c;
+    // Auxiliary catalogue pages must finish before manual control can start, and must never open
+    // while the user is typing in the server browser. Share the lock with manual/start/browser.
+    synchronized (lock(user)) {
+      initialize(u.workerId());
+      var browser = worker.status(u.workerId());
+      if (browser.mode().equals("MANUAL")) {
+        if (refresh)
+          throw new ApiException(
+              409,
+              "MANUAL_CONTROL_ACTIVE",
+              "Release manual browser control before refreshing projects.");
+        return unavailableCatalogue(user, browser.yang());
+      }
+      if (refresh && !store.manualAllowed(user))
+        throw new ApiException(409, "RUN_ACTIVE", "Catalogue refresh is available between runs.");
+      if (refresh) blockedProjects.remove(user);
+      if (!refresh && catalogues.containsKey(user)) return catalogues.get(user);
+      var auth = session(user);
+      if (!auth.state().equals("READY")) {
+        if (refresh) {
+          String code =
+              switch (auth.state()) {
+                case "AUTH_EXPIRED", "TWO_FACTOR_REQUIRED" -> auth.state();
+                default -> "YANG_LOGIN_REQUIRED";
+              };
+          throw new ApiException(409, code, "Complete Yang login before refreshing projects.");
+        }
+        return unavailableCatalogue(user, auth);
+      }
+      try {
+        var c =
+            decorate(
+                user,
+                worker.command(
+                    u.workerId(),
+                    "CATALOGUE",
+                    null,
+                    null,
+                    Map.of("refresh", refresh),
+                    Contracts.Catalogue.class));
+        catalogues.put(user, c);
+        return c;
+      } catch (ApiException e) {
+        // Login can change after the read-only preflight while the user enters a second factor.
+        if (refresh
+            || !Set.of(
+                    "BROWSER_CLOSED", "YANG_LOGIN_REQUIRED", "TWO_FACTOR_REQUIRED", "AUTH_EXPIRED")
+                .contains(e.code())) throw e;
+        return unavailableCatalogue(user, auth);
+      }
+    }
+  }
+
+  private Contracts.Catalogue unavailableCatalogue(UUID user, Contracts.YangSession auth) {
+    // Do not cache an empty passive response: polling after login/manual release must discover
+    // projects.
+    var cached = catalogues.get(user);
+    return cached != null
+        ? cached
+        : new Contracts.Catalogue(List.of(), clock.instant(), auth.poolId(), auth.suiteId());
   }
 
   private Contracts.Catalogue decorate(UUID user, Contracts.Catalogue catalogue) {

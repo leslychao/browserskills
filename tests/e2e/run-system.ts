@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, access, writeFile,copyFile,unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { BrowserOwner } from '../../apps/browser/src/owner.js';
 import { createWorkerServer } from '../../apps/browser/src/server.js';
@@ -13,6 +14,19 @@ import { startYangFixture } from '../../apps/browser/test/yang-fixture.js';
 
 const root=resolve('.');
 const rfbMode=process.argv.includes('--rfb');
+const fixtureModes=['normal','lost','voices','aspects','conditional'] as const;
+const requestedMode=process.argv.find(arg=>arg.startsWith('--fixture='))?.slice('--fixture='.length);
+if(requestedMode&&!fixtureModes.includes(requestedMode as typeof fixtureModes[number]))throw new Error('Unknown owned fixture mode');
+if(!rfbMode&&!requestedMode){
+  // Each shared workspace gets its own isolated database/profile and one fixture type.
+  for(const mode of fixtureModes){
+    const run=spawn(process.execPath,[fileURLToPath(import.meta.url),`--fixture=${mode}`],{cwd:root,env:process.env,windowsHide:true,stdio:'inherit'});
+    const code=await new Promise<number>((done,reject)=>{run.once('error',reject);run.once('exit',code=>done(code??1));});
+    if(code!==0)process.exit(code);
+  }
+  process.exit(0);
+}
+const fixtureMode=(requestedMode??'normal') as typeof fixtureModes[number];
 const directory=join(root,'.cache','system',randomUUID());
 await mkdir(directory,{recursive:true});
 const children:ChildProcess[]=[];
@@ -70,7 +84,8 @@ try{
 
   const sites:Array<Awaited<ReturnType<typeof startYangFixture>>>=[];
   const workerPorts=[];
-  for(const [index,mode] of (['normal','lost','voices','aspects','conditional'] as const).entries()){
+  for(const index of [0,1,2,3,4]){
+    const mode=index===0?fixtureMode:'normal';
     const fixture=await startYangFixture(mode);sites.push(fixture);cleanup.push(fixture.close);
     const owner=new BrowserOwner({workerId:`browser-${index+1}`,profileDir:join(directory,`profile-${index}`),mediaDir:join(directory,`media-${index}`),headless:true,startUrl:fixture.url,adapterOptions:{origin:fixture.url,frameOrigin:fixture.url,mediaOrigins:[fixture.url],instructionOrigins:[fixture.url]},verificationTimeoutMs:600});
     const app=createWorkerServer(owner,workerToken);workerPorts.push(await listen(app.server));
@@ -86,14 +101,16 @@ try{
     analyses++;
     const material=JSON.stringify(payload.messages);
     if(material.includes('"type":"input_audio"'))audioAnalyses++;
-    const schema=payload.response_format.json_schema.schema.properties;
+    const schema=payload.response_format.json_schema.schema;
+    const properties=schema.properties??{};
     let answer:unknown;
-    if(schema.sourceId){instructionAnalyses++;answer={sourceId:schema.sourceId.const,rules:'Complete every required field. Preserve original sides. Overall preference precedes aspect ratings.',complete:true,contentOnlySpeech:false};}
-    else if(schema.sourceIds){answer={sourceIds:schema.sourceIds.items.enum};}
-    else if(schema.answers){
+    if(properties.sourceId){instructionAnalyses++;answer={sourceId:properties.sourceId.const,rules:'Complete every required field. Preserve original sides. Overall preference precedes aspect ratings.',complete:true,contentOnlySpeech:false};}
+    else if(properties.sourceIds){answer={sourceIds:properties.sourceIds.items.enum};}
+    else if(schema.anyOf?.some((branch:{properties?:{decision?:{const?:string}}})=>branch.properties?.decision?.const==='ANSWER')){
       const fieldBlock=payload.messages[1].content.find((part:{text?:string})=>part.text?.startsWith('ANSWER EXACTLY THESE FIELDS: '));
       const fields=JSON.parse(fieldBlock.text.slice('ANSWER EXACTLY THESE FIELDS: '.length));
-      const partId=schema.answers.items.properties.partId.const;
+      const partBlock=payload.messages[1].content.find((part:{text?:string})=>part.text?.startsWith('CURRENT PART '));
+      const partId=partBlock.text.slice('CURRENT PART '.length).split('\n')[0];
       answer={decision:'ANSWER',reason:null,answers:fields.map((field:{id:string;kind:string;options:Array<{id:string}>;min:number|null})=>({partId,fieldId:field.id,value:field.kind==='NUMBER'?field.min??1:field.kind==='TEXT'?'Fixture explanation':field.kind==='MULTI_CHOICE'?field.options.map(o=>o.id):field.options[0].id}))};
     }else{response.writeHead(422);response.end();return;}
     response.setHeader('Content-Type','application/json');response.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(answer)}}]}));
@@ -115,22 +132,24 @@ try{
     const entry=join(directory,'headed-worker.mjs');
     await build({entryPoints:['tests/test-site/worker.ts'],bundle:true,platform:'node',format:'esm',packages:'external',outfile:entry});
     const name=`browserskills-rfb-system-${randomUUID()}`;
-    await command('docker',['run','--detach','--rm','--init','--name',name,'--read-only','--cap-drop=ALL','--security-opt','no-new-privileges','--security-opt',`seccomp=${resolve('ops/seccomp-profile.json')}`,'--shm-size=1g','--tmpfs','/tmp:size=268435456,mode=1777','--tmpfs','/run/browser:size=268435456,uid=1001,gid=1001,mode=0700','--publish','127.0.0.1::3000','--mount',`type=bind,source=${entry},target=/app/apps/browser/dist/main.js,readonly`,'--mount',`type=bind,source=${resolve('tests/test-site')},target=/app/tests/test-site,readonly`,'--env','FIXTURE_WORKER_TOKEN','--env','FIXTURE_WORKER_PORT=3000','--env','FIXTURE_WORKER_ID=browser-1','--entrypoint','/bin/bash',process.env.SYSTEM_RFB_IMAGE??'browserskills-browser:local','/app/tests/test-site/start-worker.sh'],{FIXTURE_WORKER_TOKEN:workerToken});
+    await command('docker',['run','--detach','--rm','--init','--name',name,'--read-only','--cap-drop=ALL','--security-opt','no-new-privileges','--security-opt',`seccomp=${resolve('ops/seccomp-profile.json')}`,'--shm-size=1g','--tmpfs','/tmp:size=268435456,mode=1777','--tmpfs','/run/browser:size=268435456,uid=1001,gid=1001,mode=0700','--publish','127.0.0.1::3000','--publish','127.0.0.1::3001','--mount',`type=bind,source=${entry},target=/app/apps/browser/dist/main.js,readonly`,'--mount',`type=bind,source=${resolve('tests/test-site')},target=/app/tests/test-site,readonly`,'--env','FIXTURE_WORKER_TOKEN','--env','FIXTURE_WORKER_PORT=3000','--env','FIXTURE_SITE_PORT=3001','--env','FIXTURE_WORKER_ID=browser-1','--entrypoint','/bin/bash',process.env.SYSTEM_RFB_IMAGE??'browserskills-browser:local','/app/tests/test-site/start-worker.sh'],{FIXTURE_WORKER_TOKEN:workerToken});
     cleanup.push(()=>command('docker',['rm','--force',name]));
     const headedPort=(await command('docker',['port',name,'3000/tcp'])).split(':').at(-1)!;
     environment.API_WORKER_1_URL=`http://127.0.0.1:${headedPort}`;
+    const fixturePort=(await command('docker',['port',name,'3001/tcp'])).split(':').at(-1)!;
+    environment.SYSTEM_RFB_FIXTURE_URL=`http://127.0.0.1:${fixturePort}`;
+    environment.SYSTEM_RFB_REMOTE_FIXTURE_URL='http://127.0.0.1:3001';
     const deadline=Date.now()+30_000;let ready=false;
     while(Date.now()<deadline){try{if((await fetch(`${environment.API_WORKER_1_URL}/health/live`,{signal:AbortSignal.timeout(1000)})).ok){ready=true;break;}}catch{}await new Promise(done=>setTimeout(done,200));}
     if(!ready)throw new Error('Headed Docker worker did not become ready');
   }
-  for(const login of ['alice','bob','carol','david','eve'])await command(java,['-jar',jar,'--spring.main.web-application-type=none','--spring.profiles.active=admin',`--create-user=${login}`],environment,password+'\n');
   const api=child(java,['-jar',jar,'--spring.profiles.active=dev',`--server.port=${apiPort}`,`--api.public-origin=${publicOrigin}`],environment);
   await waitHttp(`http://127.0.0.1:${apiPort}/health/live`,api);
   await command(process.execPath,['node_modules/vite/bin/vite.js','build','apps/web'],environment);
   const vite=child(process.execPath,['node_modules/vite/bin/vite.js','preview','apps/web','--host','127.0.0.1','--port',String(webPort),'--strictPort'],environment);
   await waitHttp(`http://127.0.0.1:${webPort}`,vite);
   process.stdout.write('Fixture system ready: real PostgreSQL + Spring + Chromium; stub model.\n');
-  const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_URL:publicOrigin,SYSTEM_PASSWORD:password,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});
+  const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_FIXTURE_MODE:fixtureMode,SYSTEM_URL:publicOrigin,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});
   test.processHandle.stdout!.on('data',chunk=>process.stdout.write(chunk));test.processHandle.stderr!.on('data',chunk=>process.stderr.write(chunk));
   const deadline=setTimeout(()=>test.processHandle.kill(),480_000);
   process.exitCode=await test.done.finally(()=>clearTimeout(deadline));

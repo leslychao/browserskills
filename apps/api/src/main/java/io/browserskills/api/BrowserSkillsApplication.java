@@ -6,7 +6,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import tools.jackson.databind.json.JsonMapper;
 
-@SpringBootApplication
+@SpringBootApplication(
+    exclude =
+        org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration.class)
 public class BrowserSkillsApplication {
   public static void main(String[] args) {
     SpringApplication.run(BrowserSkillsApplication.class, args);

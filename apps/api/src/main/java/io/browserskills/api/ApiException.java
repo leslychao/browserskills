@@ -22,8 +22,4 @@ public final class ApiException extends RuntimeException {
     return new ApiException(
         400, "INVALID_REQUEST", "Request does not match the supported task format.");
   }
-
-  public static ApiException unauthorized() {
-    return new ApiException(401, "UNAUTHORIZED", "Authentication required.");
-  }
 }

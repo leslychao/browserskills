@@ -8,10 +8,6 @@ import java.util.UUID;
 public final class Contracts {
   private Contracts() {}
 
-  public record LoginRequest(String login, String password) {}
-
-  public record UserView(UUID id, String login) {}
-
   public record Quota(int limit, int used, int remaining, Instant resetsAt) {}
 
   public record Me(UUID id, String login, Quota quota) {}

@@ -42,7 +42,6 @@ class ServerIT {
   @Autowired PasswordEncoder encoder;
   @Autowired Materials materials;
   @Autowired ManualLeases leases;
-  @Autowired LoginRateLimiter limiter;
   @MockitoBean WorkerClient worker;
   @MockitoBean InferenceClient model;
   @MockitoBean QualityGates gates;
@@ -53,11 +52,74 @@ class ServerIT {
   private HttpClient client;
   private UUID user;
   private String csrf;
+  private UUID controlId = UUID.randomUUID();
+
+  @Test
+  void manualControlRejectsMissingOrInvalidTabIdsWithoutBypassingCsrf() throws Exception {
+    prepareBrowserClient();
+    for (String method : List.of("GET", "POST", "DELETE")) {
+      for (String tab : new String[] {null, "not-a-uuid"}) {
+        var request =
+            HttpRequest.newBuilder(uri("/api/browser/manual-control"))
+                .timeout(Duration.ofSeconds(10))
+                .header("X-CSRF-TOKEN", csrf)
+                .method(method, HttpRequest.BodyPublishers.noBody());
+        if (tab != null) request.header("X-Browser-Control", tab);
+        var response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, response.statusCode(), method + " tab=" + tab + ": " + response.body());
+        assertEquals("INVALID_REQUEST", json(response).path("code").asString());
+      }
+    }
+    for (String method : List.of("POST", "DELETE")) {
+      var request =
+          HttpRequest.newBuilder(uri("/api/browser/manual-control?takeOver=true"))
+              .timeout(Duration.ofSeconds(10))
+              .header("X-Browser-Control", controlId.toString())
+              .method(method, HttpRequest.BodyPublishers.noBody());
+      var response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+      assertEquals(403, response.statusCode(), response.body());
+      assertEquals("FORBIDDEN", json(response).path("code").asString());
+    }
+    verify(worker, never()).command(anyInt(), eq("ENTER_MANUAL"), any(), any(), any(), any());
+    verify(worker, never()).command(anyInt(), eq("EXIT_MANUAL"), any(), any(), any(), any());
+    assertEquals("AVAILABLE", leases.status(user, "unclaimed").state());
+  }
+
+  @Test
+  void tabOwnershipRequiresExplicitTakeoverAndRejectsStaleRelease() throws Exception {
+    prepareBrowserClient();
+    assertEquals(200, request("POST", "/api/browser/manual-control", null).statusCode());
+    when(worker.status(1)).thenReturn(status("MANUAL"));
+    assertEquals(
+        "OWNED",
+        json(request("GET", "/api/browser/manual-control", null)).path("state").asString());
+    var first = controlId;
+    controlId = UUID.randomUUID();
+    assertEquals(
+        "IN_USE",
+        json(request("GET", "/api/browser/manual-control", null)).path("state").asString());
+    assertEquals(409, request("POST", "/api/browser/manual-control", null).statusCode());
+    assertEquals(403, request("DELETE", "/api/browser/manual-control", null).statusCode());
+    assertEquals(
+        200, request("POST", "/api/browser/manual-control?takeOver=true", null).statusCode());
+    assertEquals(
+        "OWNED",
+        json(request("GET", "/api/browser/manual-control", null)).path("state").asString());
+    var second = controlId;
+    controlId = first;
+    assertEquals(
+        "IN_USE",
+        json(request("GET", "/api/browser/manual-control", null)).path("state").asString());
+    assertEquals(403, request("DELETE", "/api/browser/manual-control", null).statusCode());
+    controlId = second;
+    assertEquals(200, request("DELETE", "/api/browser/manual-control", null).statusCode());
+    assertEquals(
+        "AVAILABLE",
+        json(request("GET", "/api/browser/manual-control", null)).path("state").asString());
+  }
 
   @BeforeEach
   void setup() {
-    ((Map<?, ?>) org.springframework.test.util.ReflectionTestUtils.getField(limiter, "attempts"))
-        .clear();
     db.execute("TRUNCATE users CASCADE");
     user = store.provision("alice", encoder.encode("test-password-123"));
     client =
@@ -166,6 +228,8 @@ class ServerIT {
 
   private HttpResponse<String> request(String method, String path, Object body) throws Exception {
     var b = HttpRequest.newBuilder(uri(path)).timeout(Duration.ofSeconds(10));
+    if (path.startsWith("/api/browser/manual-control"))
+      b.header("X-Browser-Control", controlId.toString());
     if (csrf != null) b.header("X-CSRF-TOKEN", csrf);
     if (body == null) b.method(method, HttpRequest.BodyPublishers.noBody());
     else
@@ -179,16 +243,8 @@ class ServerIT {
     return Json.mapper().readTree(response.body());
   }
 
-  private void login() throws Exception {
-    csrf = json(request("GET", "/api/auth/csrf", null)).path("token").asString();
-    assertEquals(
-        200,
-        request(
-                "POST",
-                "/api/auth/login",
-                Map.of("login", "alice", "password", "test-password-123"))
-            .statusCode());
-    csrf = json(request("GET", "/api/auth/csrf", null)).path("token").asString();
+  private void prepareBrowserClient() throws Exception {
+    csrf = json(request("GET", "/api/csrf", null)).path("token").asString();
   }
 
   private JsonNode await(UUID id, String state) throws Exception {
@@ -205,9 +261,11 @@ class ServerIT {
   }
 
   @Test
-  void websocketRequiresOriginAndLeaseAndRevokesAnExistingRfbConnectionOnLogout() throws Exception {
-    login();
-    URI websocket = URI.create("ws://127.0.0.1:" + port + "/api/browser/view");
+  void anonymousWebsocketRequiresOriginAndLeaseAndRevokesConnectionOnManualRelease()
+      throws Exception {
+    prepareBrowserClient();
+    URI websocket =
+        URI.create("ws://127.0.0.1:" + port + "/api/browser/view?controlId=" + controlId);
     assertThrows(
         Exception.class,
         () ->
@@ -268,52 +326,32 @@ class ServerIT {
       assertEquals(
           "client-input", new String(peer.input.get(2, java.util.concurrent.TimeUnit.SECONDS)));
       assertEquals("Bearer worker-fixture-secret", peer.authorization.get());
-      assertEquals(204, request("POST", "/api/auth/logout", null).statusCode());
+      assertEquals(200, request("DELETE", "/api/browser/manual-control", null).statusCode());
       assertEquals(1008, closed.get(3, java.util.concurrent.TimeUnit.SECONDS));
     }
   }
 
   @Test
-  void cookieCsrfLoginDisabledUserAndLogoutBoundaries() throws Exception {
-    assertEquals(200, request("GET", "/health/live", null).statusCode());
-    assertEquals(401, request("GET", "/api/me", null).statusCode());
-    assertEquals(
-        403,
-        request(
-                "POST",
-                "/api/auth/login",
-                Map.of("login", "alice", "password", "test-password-123"))
-            .statusCode());
-    csrf = json(request("GET", "/api/auth/csrf", null)).path("token").asString();
-    byte[] oversized =
-        ("{\"login\":\"alice\",\"password\":\"" + "x".repeat(32768) + "\"}")
-            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-    var chunked =
-        HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(oversized));
-    assertEquals(-1, chunked.contentLength());
-    var rejected =
-        client.send(
-            HttpRequest.newBuilder(uri("/api/auth/login"))
-                .version(HttpClient.Version.HTTP_1_1)
-                .timeout(Duration.ofSeconds(5))
-                .header("Content-Type", "application/json")
-                .header("X-CSRF-TOKEN", csrf)
-                .POST(chunked)
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
-    assertEquals(413, rejected.statusCode(), rejected.body());
-    assertEquals("REQUEST_TOO_LARGE", json(rejected).path("code").asString());
-    login();
+  void sharedWorkspaceNeedsNoLoginAndRetainsRequestBounds() throws Exception {
+    assertEquals(200, request("GET", "/api/me", null).statusCode());
     assertEquals("alice", json(request("GET", "/api/me", null)).path("login").asString());
+    var fresh = HttpClient.newHttpClient();
+    assertEquals(
+        user.toString(),
+        json(fresh.send(
+                HttpRequest.newBuilder(uri("/api/me")).GET().build(),
+                HttpResponse.BodyHandlers.ofString()))
+            .path("id")
+            .asString());
+    prepareBrowserClient();
+    assertEquals(404, request("POST", "/api/auth/login", Map.of()).statusCode());
+    assertEquals(404, request("POST", "/api/auth/logout", null).statusCode());
+    assertEquals(404, request("GET", "/api/auth/csrf", null).statusCode());
     assertEquals(200, request("POST", "/api/browser", null).statusCode());
-    assertEquals(200, request("GET", "/api/browser", null).statusCode());
     assertEquals(200, request("POST", "/api/browser/manual-control", null).statusCode());
     assertEquals(200, request("DELETE", "/api/browser/manual-control", null).statusCode());
-    assertEquals(204, request("POST", "/api/auth/logout", null).statusCode());
-    assertEquals(401, request("GET", "/api/me", null).statusCode());
-    login();
     store.disable("alice");
-    assertEquals(401, request("GET", "/api/me", null).statusCode());
+    assertEquals(200, request("GET", "/api/me", null).statusCode());
   }
 
   private Contracts.YangSession yang() {
@@ -323,7 +361,7 @@ class ServerIT {
 
   @Test
   void autonomousRunSendsWholeSuitesAndRemovedConfirmEndpointCannotSend() throws Exception {
-    login();
+    prepareBrowserClient();
     var request = SnapshotValidationTest.start(3);
     var started = request("POST", "/api/runs", request);
     assertEquals(200, started.statusCode(), started.body());
@@ -339,7 +377,7 @@ class ServerIT {
 
   @Test
   void twoFactorPauseAndResumeRetainOneActiveRun() throws Exception {
-    login();
+    prepareBrowserClient();
     yangState.set("TWO_FACTOR_REQUIRED");
     var started = request("POST", "/api/runs", SnapshotValidationTest.start(1));
     UUID run = UUID.fromString(json(started).path("id").asString());
@@ -356,7 +394,7 @@ class ServerIT {
 
   @Test
   void selectionAndCatalogueAreOwnedAndUnverifiedQualityNeverSubmits() throws Exception {
-    login();
+    prepareBrowserClient();
     assertEquals(200, request("GET", "/api/yang/session", null).statusCode());
     assertEquals(200, request("POST", "/api/yang/catalogue/refresh", null).statusCode());
     assertEquals(
@@ -384,7 +422,7 @@ class ServerIT {
 
   @Test
   void failedInstructionBeforeReservationSkipsToNextAutoCandidate() throws Exception {
-    login();
+    prepareBrowserClient();
     var catalogue =
         new Contracts.Catalogue(
             List.of(
@@ -460,7 +498,7 @@ class ServerIT {
 
   @Test
   void knownQualityFailureBlocksCatalogueBeforeAnyInstructionCall() throws Exception {
-    login();
+    prepareBrowserClient();
     when(gates.allowed(anyString())).thenReturn(false);
     var catalogue =
         new Contracts.Catalogue(
@@ -493,7 +531,7 @@ class ServerIT {
 
   @Test
   void lostSubmitResponseIsUnknownAndTheSameSuiteCannotBeSentInAnotherRun() throws Exception {
-    login();
+    prepareBrowserClient();
     when(worker.command(
             anyInt(),
             eq("SUBMIT"),
@@ -527,7 +565,7 @@ class ServerIT {
 
   @Test
   void knownFaceIdentityProjectIsBlockedEvenWithPassingImageCapability() throws Exception {
-    login();
+    prepareBrowserClient();
     when(gates.allowed(anyString())).thenReturn(true);
     var identity =
         new Contracts.CatalogueItem(
@@ -558,7 +596,7 @@ class ServerIT {
 
   @Test
   void expiredReservedSuiteAfterTwoFactorConsumesNoModelCalls() throws Exception {
-    login();
+    prepareBrowserClient();
     yangState.set("TWO_FACTOR_REQUIRED");
     UUID run =
         UUID.fromString(

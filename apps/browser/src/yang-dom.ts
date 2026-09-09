@@ -6,7 +6,7 @@ export interface RawPart { id:string; text:string; materialText:string; fields:R
 export interface RawInstruction { blocks:Array<{type:'text';text:string}|{type:'image'|'audio';url:string;caption:string}>; documents:string[]; }
 
 export function authDom():'LOGIN_REQUIRED'|'SECOND_FACTOR_REQUIRED'|'CONNECTED'|'UNKNOWN' {
-  const visible=(e:Element)=>!e.closest('[hidden],[aria-hidden="true"]')&&getComputedStyle(e).display!=='none';
+  const visible=(e:Element)=>{for(let node:Element|null=e;node;node=node.parentElement)if(node.matches('[hidden],[aria-hidden="true"]')||getComputedStyle(node).display==='none'||getComputedStyle(node).visibility==='hidden')return false;return true;};
   const inputs=Array.from(document.querySelectorAll('input')).filter(visible) as HTMLInputElement[];
   if(inputs.some(e=>e.autocomplete==='one-time-code'||/^(otp|code|verification_code)$/i.test(e.name)||e.inputMode==='numeric'&&e.maxLength===6))return 'SECOND_FACTOR_REQUIRED';
   if(inputs.some(e=>e.type==='password'||e.autocomplete==='username'||/^login$/i.test(e.name)))return 'LOGIN_REQUIRED';
@@ -14,7 +14,10 @@ export function authDom():'LOGIN_REQUIRED'|'SECOND_FACTOR_REQUIRED'|'CONNECTED'|
   const anchors=Array.from(document.querySelectorAll('a[href]'));
   const catalogue=anchors.some(e=>e.getAttribute('href')==='/profile')&&anchors.some(e=>['/','/?activeTab=all'].includes(e.getAttribute('href')??''))&&!!document.querySelector('[role="radiogroup"] [role="radio"],input[type="radio"][value="all"]')
     ||anchors.some(e=>/activeTab=(all|active)/.test(e.getAttribute('href')??''))&&(/В работе|Избранн|Скрыт/.test(text));
-  const task=/^\/task\/[^/]+\/[^/]+/.test(location.pathname)&&Array.from(document.querySelectorAll('button')).some(e=>visible(e)&&/^(Отправить|Send)$/.test(e.textContent?.trim()??''))&&!!document.querySelector('iframe');
+  const buttons=Array.from(document.querySelectorAll('button')).filter(visible);
+  const submit=buttons.some(e=>/^(Отправить|Send)$/.test(e.textContent?.trim()??''));
+  const instructionAndTimer=buttons.some(e=>(e.textContent?.trim()??'')==='Инструкция')&&Array.from(document.querySelectorAll('.task-info__values-time')).some(visible);
+  const task=/^\/task\/[^/]+\/[^/]+/.test(location.pathname)&&(submit||instructionAndTimer)&&!!document.querySelector('iframe');
   if(catalogue||task)return 'CONNECTED';
   if(Array.from(document.querySelectorAll('button,a')).some(e=>visible(e)&&/^Войти$/.test(e.textContent?.trim()??'')))return 'LOGIN_REQUIRED';
   return 'UNKNOWN';

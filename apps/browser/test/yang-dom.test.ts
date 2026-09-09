@@ -9,6 +9,14 @@ describe('Yang DOM contracts',()=>{
     document.body.innerHTML='<input autocomplete="one-time-code">';expect(authDom()).toBe('SECOND_FACTOR_REQUIRED');
     document.body.innerHTML='<a href="/?activeTab=all">Задания</a><a href="/?activeTab=active">В работе</a><span>Избранное</span>';expect(authDom()).toBe('CONNECTED');
   });
+  it('recognizes an authenticated expired Yang suite by instruction, visible timer and iframe without Submit',()=>{
+    const previous=location.pathname;history.replaceState({},'','/task/123/suite-expired');
+    try{
+      expect(authDom()).toBe('UNKNOWN');document.body.innerHTML='<button>Инструкция</button><span class="task-info__values-time">0:00</span><iframe></iframe>';expect(authDom()).toBe('CONNECTED');
+      (document.querySelector('.task-info__values-time') as HTMLElement).style.display='none';expect(authDom()).toBe('UNKNOWN');
+      (document.querySelector('.task-info__values-time') as HTMLElement).style.display='';document.querySelector('iframe')!.remove();expect(authDom()).toBe('UNKNOWN');
+    }finally{history.replaceState({},'',previous);}
+  });
   it('extracts comparable reward per platform unit and pool identity, never ordinal or title',()=>{
     document.body.innerHTML='<ul><li><h3>Project</h3><span>15.00 за задание</span><a href="/instructions/94707463">Инструкция</a><button>Приступить</button></li></ul>';
     expect(catalogueDom()).toMatchObject([{poolId:'94707463',price:'15.00',unit:'за задание',available:true}]);

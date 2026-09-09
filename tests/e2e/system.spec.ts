@@ -2,12 +2,11 @@ import {test,expect,type APIRequestContext,type Page} from '@playwright/test';
 import {RunViewSchema,defaultSelection,CatalogueSchema} from '@browserskills/contracts';
 
 async function change(api:APIRequestContext,path:string,data?:unknown){
-  const csrf=await(await api.get('/api/auth/csrf')).json();
+  const csrf=await(await api.get('/api/csrf')).json();
   return api.post(path,{headers:{[csrf.headerName]:csrf.token},data});
 }
-async function login(page:Page,login:string){
-  await page.goto('/');await page.getByLabel('Логин',{exact:true}).fill(login);await page.getByLabel('Пароль',{exact:true}).fill(process.env.SYSTEM_PASSWORD!);
-  await page.getByRole('button',{name:'Войти',exact:true}).click();await expect(page.getByRole('heading',{name:'Яндекс Янг',exact:true})).toBeVisible();
+async function openWorkspace(page:Page){
+  await page.goto('/');await expect(page.getByRole('heading',{name:'Яндекс Янг',exact:true})).toBeVisible();
   const opened=await change(page.request,'/api/browser');expect(opened.status(),await opened.text()).toBe(200);
   await expect.poll(async()=> (await(await page.request.get('/api/yang/session')).json()).state,{timeout:30000}).toBe('READY');
   const catalogue=await change(page.request,'/api/yang/catalogue/refresh');expect(catalogue.status(),await catalogue.text()).toBe(200);
@@ -25,7 +24,8 @@ async function start(api:APIRequestContext,maxTasks:number,poolId:string|null=nu
 async function diagnostics(api:APIRequestContext){return(await api.get(process.env.SYSTEM_DIAGNOSTICS_URL!,{headers:{Authorization:'Bearer '+process.env.SYSTEM_DIAGNOSTICS_TOKEN}})).json();}
 
 test('real services autonomously send 50 distinct whole sets and prepare complete instructions once',async({page})=>{
-  const catalogue=await login(page,'alice');expect(catalogue.items).toHaveLength(1);
+  test.skip(process.env.SYSTEM_FIXTURE_MODE!=='normal');
+  const catalogue=await openWorkspace(page);expect(catalogue.items).toHaveLength(1);
   const run=await start(page.request,50);
   const completed=await awaitState(page.request,run.id,'COMPLETED');expect(completed.processed).toBe(50);
   expect(completed.results).toHaveLength(50);expect(completed.results.every(r=>r.status==='SUBMITTED'&&r.answers&&r.answers.length>=2)).toBe(true);
@@ -37,32 +37,35 @@ test('real services autonomously send 50 distinct whole sets and prepare complet
 });
 
 test('lost external acknowledgement stops UNKNOWN and a later run cannot repeat that suite',async({page,browser})=>{
-  await login(page,'bob');const run=await start(page.request,1);await awaitState(page.request,run.id,'UNKNOWN');
-  expect((await diagnostics(page.request)).sites[1].submissions).toHaveLength(1);
+  test.skip(process.env.SYSTEM_FIXTURE_MODE!=='lost');
+  await openWorkspace(page);const run=await start(page.request,1);await awaitState(page.request,run.id,'UNKNOWN');
+  expect((await diagnostics(page.request)).sites[0].submissions).toHaveLength(1);
   expect((await change(page.request,'/api/runs/'+run.id+'/resume')).status()).toBe(409);
   await change(page.request,'/api/browser');const later=await start(page.request,1);
   await expect.poll(async()=>['WAITING_FOR_USER','FAILED','UNKNOWN'].includes((await view(page.request,later.id)).status),{timeout:30000}).toBe(true);
-  expect((await diagnostics(page.request)).sites[1].submissions).toHaveLength(1);
+  expect((await diagnostics(page.request)).sites[0].submissions).toHaveLength(1);
   const other=await browser.newContext({baseURL:process.env.SYSTEM_URL});
   try{
-    expect((await change(other.request,'/api/auth/login',{login:'alice',password:process.env.SYSTEM_PASSWORD})).status()).toBe(200);
-    expect((await other.request.get('/api/runs/'+run.id)).status()).toBe(404);
+    expect((await other.request.get('/api/runs/'+run.id)).status()).toBe(200);
+    expect((await view(other.request,run.id)).status).toBe('UNKNOWN');
   }finally{await other.close();}
 });
 
-for(const [name,index,pairs] of [['carol',2,5],['david',3,3]] as const){
+for(const [name,pairs] of [['voices',5],['aspects',3]] as const){
   test('whole audio '+name+' uses all '+pairs+' pairs and sends exactly one outer submission',async({page})=>{
-    const catalogue=await login(page,name);const run=await start(page.request,1,catalogue.items[0].poolId);
+    test.skip(process.env.SYSTEM_FIXTURE_MODE!==name);
+    const catalogue=await openWorkspace(page);const run=await start(page.request,1,catalogue.items[0].poolId);
     const completed=await awaitState(page.request,run.id,'COMPLETED');expect(completed.processed).toBe(1);
     const answers=completed.results[0].answers!;expect(new Set(answers.map(a=>a.partId)).size).toBe(pairs);
-    expect(answers).toHaveLength(pairs*(name==='carol'?3:19));
-    const evidence=await diagnostics(page.request);expect(evidence.sites[index].submissions).toHaveLength(1);expect(evidence.audioAnalyses).toBeGreaterThan(0);
+    expect(answers).toHaveLength(pairs*(name==='voices'?3:19));
+    const evidence=await diagnostics(page.request);expect(evidence.sites[0].submissions).toHaveLength(1);expect(evidence.audioAnalyses).toBeGreaterThan(0);
   });
 }
 
 test('conditional required fields discovered after filling are answered before submission',async({page})=>{
-  await login(page,'eve');const run=await start(page.request,1);const completed=await awaitState(page.request,run.id,'COMPLETED');
+  test.skip(process.env.SYSTEM_FIXTURE_MODE!=='conditional');
+  await openWorkspace(page);const run=await start(page.request,1);const completed=await awaitState(page.request,run.id,'COMPLETED');
   expect(completed.results[0].answers).toHaveLength(2);
   expect(completed.results[0].answers?.some(a=>a.value==='Fixture explanation')).toBe(true);
-  expect((await diagnostics(page.request)).sites[4].submissions).toHaveLength(1);
+  expect((await diagnostics(page.request)).sites[0].submissions).toHaveLength(1);
 });

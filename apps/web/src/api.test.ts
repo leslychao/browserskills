@@ -3,7 +3,18 @@ import { ApiClient, ClientError } from './api';
 import { browserStatus,catalogue,run,selection,user } from './test-fixtures';
 
 const json = (body: unknown, status=200) => new Response(JSON.stringify(body), {status,headers:{'Content-Type':'application/json'}});
-describe('session API client', () => {
+describe('shared workspace API client', () => {
+  it('scopes manual control to a tab and only takes over explicitly',async()=>{
+    const request=vi.fn<typeof fetch>().mockImplementation(async(path,init)=>json(String(path)==='/api/csrf'?{token:'csrf',headerName:'X-CSRF-TOKEN'}:init?.method?browserStatus:{state:'IN_USE',expiresAt:null}));
+    const first=new ApiClient(request);const second=new ApiClient(request);
+    expect(first.controlId).not.toBe(second.controlId);
+    expect(await first.manualControl()).toEqual({state:'IN_USE',expiresAt:null});
+    await first.enterManual(true);await first.exitManual();
+    expect(request.mock.calls[0][1]?.headers).toEqual({'X-Browser-Control':first.controlId});
+    expect(request.mock.calls[2][0]).toBe('/api/browser/manual-control?takeOver=true');
+    expect(request.mock.calls[2][1]?.headers).toMatchObject({'X-Browser-Control':first.controlId,'X-CSRF-TOKEN':'csrf'});
+    expect(request.mock.calls[4][1]?.headers).toMatchObject({'X-Browser-Control':first.controlId});
+  });
   it('starts a run with a UUID when the LAN browser has no crypto.randomUUID', async () => {
     vi.stubGlobal('crypto', {getRandomValues:crypto.getRandomValues.bind(crypto)});
     try {
@@ -16,12 +27,12 @@ describe('session API client', () => {
   });
   it('gets a fresh CSRF token for each mutation and uses same-origin cookies', async () => {
     const request = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(json({token:'first',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(json({id:'u',login:'demo'}))
-      .mockResolvedValueOnce(json({token:'second',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(new Response(null,{status:204}));
+      .mockResolvedValueOnce(json({token:'first',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(json(browserStatus))
+      .mockResolvedValueOnce(json({token:'second',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(json(browserStatus));
     const client = new ApiClient(request);
-    await client.login('demo','secret');
-    await client.logout();
-    expect(request.mock.calls.map(([url])=>url)).toEqual(['/api/auth/csrf','/api/auth/login','/api/auth/csrf','/api/auth/logout']);
+    await client.enterManual();
+    await client.exitManual();
+    expect(request.mock.calls.map(([url])=>url)).toEqual(['/api/csrf','/api/browser/manual-control','/api/csrf','/api/browser/manual-control']);
     expect(request.mock.calls[1][1]).toMatchObject({method:'POST',credentials:'same-origin',headers:{'X-CSRF-TOKEN':'first'}});
     expect(request.mock.calls[3][1]).toMatchObject({headers:{'X-CSRF-TOKEN':'second'}});
   });
@@ -32,9 +43,9 @@ describe('session API client', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
   it('preserves server error codes and refuses invalid API payloads', async () => {
-    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json({code:'AUTH_REQUIRED',message:'Войдите снова'},401)).mockResolvedValueOnce(json({id:'bad'}));
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json({code:'WORKER_UNAVAILABLE',message:'Браузер недоступен'},503)).mockResolvedValueOnce(json({id:'bad'}));
     const client = new ApiClient(request);
-    await expect(client.me()).rejects.toMatchObject({status:401,code:'AUTH_REQUIRED'});
+    await expect(client.me()).rejects.toMatchObject({status:503,code:'WORKER_UNAVAILABLE'});
     await expect(client.me()).rejects.toBeInstanceOf(ClientError);
   });
   it('does not expose unstructured server HTML as an error message', async () => {
@@ -51,10 +62,10 @@ describe('session API client', () => {
   });
   it('uses CSRF for catalogue refresh, saved filters, manual control, resume and stop',async()=>{
     const responses:Record<string,unknown>={'/api/yang/catalogue/refresh':catalogue,'/api/yang/selection':selection,'/api/browser':browserStatus,'/api/browser/manual-control':browserStatus,'/api/runs/run%2F1/resume':run,'/api/runs/run%2F1/stop':run};
-    const request=vi.fn<typeof fetch>().mockImplementation(async path=>json(String(path)==='/api/auth/csrf'?{token:'csrf',headerName:'X-CSRF-TOKEN'}:responses[String(path)]));
+    const request=vi.fn<typeof fetch>().mockImplementation(async path=>json(String(path)==='/api/csrf'?{token:'csrf',headerName:'X-CSRF-TOKEN'}:responses[String(path)]));
     const client=new ApiClient(request);
     await client.refreshCatalogue();await client.saveSelection(selection);await client.openBrowser();await client.enterManual();await client.exitManual();await client.resume('run/1');await client.stop('run/1');
-    const mutations=request.mock.calls.filter(([url])=>url!=='/api/auth/csrf');
+    const mutations=request.mock.calls.filter(([url])=>url!=='/api/csrf');
     expect(mutations.map(([,init])=>init?.method)).toEqual(['POST','PUT','POST','POST','DELETE','POST','POST']);
     expect(mutations.every(([,init])=>(init?.headers as Record<string,string>)['X-CSRF-TOKEN']==='csrf')).toBe(true);
     expect(JSON.parse(mutations[1][1]!.body as string)).toEqual(selection);

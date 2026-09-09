@@ -151,13 +151,23 @@ class StoreIT {
   }
 
   @Test
-  void fiveAssignmentsAndDisabledAccountsRemainEnforced() {
+  void emptyInstallationCreatesOneStableSharedWorkspace() {
+    db.execute("TRUNCATE users CASCADE");
+    var first = store.localWorkspace();
+    assertEquals(1, first.workerId());
+    assertEquals(first.id(), store.localWorkspace().id());
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM users", Integer.class));
+  }
+
+  @Test
+  void sharedWorkspacePreservesFirstProfileAndIgnoresOldLoginStatus() {
     for (int i = 2; i <= 5; i++) store.provision("user" + i, "hash");
     assertThrows(ApiException.class, () -> store.provision("six", "hash"));
     assertEquals(user, store.findLogin("alice").id());
     assertNull(store.findLogin("missing"));
     assertTrue(store.disable("alice"));
-    assertThrows(ApiException.class, () -> store.user(user));
+    assertEquals(user, store.localWorkspace().id());
+    assertEquals(user, store.user(user).id());
     assertFalse(store.disable("missing"));
   }
 

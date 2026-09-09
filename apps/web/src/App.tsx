@@ -1,8 +1,7 @@
 import { useCallback,useEffect,useRef,useState } from 'react';
 import { SelectionSettingsSchema } from '@browserskills/contracts';
 import type { BrowserStatus,Catalogue,Me,RunSummary,RunView,SelectionSettings,YangSession } from '@browserskills/contracts';
-import { ApiClient,ClientError } from './api';
-import { Login } from './Login';
+import { ApiClient } from './api';
 import { RemoteBrowser } from './RemoteBrowser';
 import { SelectionPanel } from './SelectionPanel';
 import { TaskSetPanel } from './TaskSetPanel';
@@ -20,6 +19,9 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
   const [me,setMe]=useState<Me|null>(null);
   const [initial,setInitial]=useState(true);
   const [browser,setBrowser]=useState<BrowserStatus|null>(null);
+  const [control,setControl]=useState<Awaited<ReturnType<ApiClient['manualControl']>>|null>(null);
+  const [connection,setConnection]=useState(0);
+  const [connectingScreen,setConnectingScreen]=useState(false);
   const [catalogue,setCatalogue]=useState<Catalogue|null>(null);
   const [selection,setSelection]=useState<SelectionSettings|null>(null);
   const [saved,setSaved]=useState(false);
@@ -31,21 +33,18 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
   const [limit,setLimit]=useState(50);
   const inFlight=useRef(false);
   const revision=useRef(0);
-  const sessionEpoch=useRef(0);
-  const reset=useCallback(()=>{sessionEpoch.current++;revision.current++;setMe(null);setBrowser(null);setCatalogue(null);setSelection(null);setSaved(false);setRuns([]);setView(null);setRunId(null);setLimit(50);},[]);
   const handleError=useCallback((cause:unknown)=>{
-    if(cause instanceof ClientError&&cause.status===401)reset();
     setError(cause instanceof Error?cause.message:'Не удалось выполнить действие. Проверьте состояние сервера.');
-  },[reset]);
+  },[]);
   useEffect(()=>{
     let disposed=false;
-    client.me().then(value=>{if(!disposed)setMe(value);}).catch(cause=>{if(!disposed&&!(cause instanceof ClientError&&cause.status===401))handleError(cause);}).finally(()=>{if(!disposed)setInitial(false);});
+    client.me().then(value=>{if(!disposed)setMe(value);}).catch(cause=>{if(!disposed)handleError(cause);}).finally(()=>{if(!disposed)setInitial(false);});
     return()=>{disposed=true;};
   },[client,handleError]);
   useEffect(()=>{
     if(!me)return;
-    let disposed=false;const epoch=sessionEpoch.current;
-    client.selection().then(value=>{if(!disposed&&epoch===sessionEpoch.current)setSelection(value);}).catch(cause=>{if(!disposed&&epoch===sessionEpoch.current)handleError(cause);});
+    let disposed=false;
+    client.selection().then(value=>{if(!disposed)setSelection(value);}).catch(cause=>{if(!disposed)handleError(cause);});
     return()=>{disposed=true;};
   },[me?.id,client,handleError]);
   const act=async(action:()=>Promise<void>)=>{
@@ -60,9 +59,9 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
       if(inFlight.current||polling)return;
       polling=true;const currentRevision=revision.current;
       try{
-        const [identity,status,list,projects]=await Promise.all([client.me(),client.browser(),client.runs(),client.catalogue()]);
+        const [identity,status,list,projects,ownership]=await Promise.all([client.me(),client.browser(),client.runs(),client.catalogue(),client.manualControl()]);
         if(disposed||currentRevision!==revision.current)return;
-        setMe(identity);setBrowser(status);setRuns(list);setCatalogue(projects);
+        setMe(identity);setBrowser(status);setRuns(list);setCatalogue(projects);setControl(ownership);
         const selected=runId??list.find(run=>activeStatuses.has(run.status))?.id??list[0]?.id;
         if(selected){
           const value=await client.run(selected);
@@ -76,19 +75,28 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
     return()=>{disposed=true;clearInterval(timer);};
   },[me?.id,client,runId,pollInterval,handleError]);
   if(initial)return <main className="loading" role="status">Открываем рабочее пространство…</main>;
-  if(!me)return <Login busy={pending} error={error} onLogin={(login,password)=>act(async()=>{await client.login(login,password);setMe(await client.me());})}/>;
+  if(!me)return <main className="loading"><p role="alert">{error??'Не удалось открыть рабочее пространство.'}</p><button onClick={()=>window.location.reload()}>Повторить подключение</button></main>;
 
   const activeRun=runs.find(run=>activeStatuses.has(run.status))??(view&&activeStatuses.has(view.status)?view:null);
   const active=activeRun!==null;
   const paused=activeRun!==null&&pausedStatuses.has(activeRun.status);
-  const manual=browser?.mode==='MANUAL';
+  const manual=browser?.mode==='MANUAL'&&control?.state==='OWNED';
+  const controlInUse=browser?.mode==='MANUAL'&&control?.state==='IN_USE';
   const ready=browser?.yang.state==='READY'&&browser.mode!=='CLOSED';
   const validSelection=SelectionSettingsSchema.safeParse(selection).success;
   const chosen=selection?.poolId?catalogue?.items.find(item=>item.poolId===selection.poolId):null;
   const manualTarget=selection?.poolId?chosen&&chosen.availability!=='UNAVAILABLE'&&chosen.preparation!=='BLOCKED':catalogue?.activeSuiteId;
   const canStart=ready&&!active&&validSelection&&Number.isInteger(limit)&&limit>=1&&limit<=50&&(selection?.mode==='AUTO'||Boolean(manualTarget));
   const updateView=(value:RunView)=>{setView(value);setRunId(value.id);setRuns(previous=>[value,...previous.filter(item=>item.id!==value.id)]);};
-  const connect=()=>act(async()=>{if(!browser||browser.mode==='CLOSED')setBrowser(await client.openBrowser());setBrowser(await client.enterManual());});
+  const connect=(takeOver=false)=>act(async()=>{
+    setConnectingScreen(true);
+    try{
+      const current=await client.browser();
+      if(current.mode==='CLOSED')setBrowser(await client.openBrowser());
+      setBrowser(await client.enterManual(takeOver));
+      setControl(await client.manualControl());setConnection(value=>value+1);
+    }finally{setConnectingScreen(false);}
+  });
   const save=()=>act(async()=>{if(!selection)return;setSelection(await client.saveSelection(selection));setSaved(true);});
   const start=()=>act(async()=>{
     if(!selection||!canStart)return;
@@ -100,15 +108,16 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
     <aside className="sidebar"><a className="brand" href="/" aria-label="BrowserSkills"><span className="brand-mark">b.</span> BrowserSkills</a><div className="sidebar-context">Яндекс Янг<span>Рабочее пространство</span></div>
       <div className="sidebar-heading">Запуски <span>{runs.length}</span></div>
       <nav aria-label="История запусков" className="history">{runs.length===0?<p>История появится после первого запуска.</p>:runs.map(run=><button key={run.id} className={run.id===view?.id?'current':''} onClick={()=>{if(run.id!==runId){revision.current++;setRunId(run.id);setView(null);}}} disabled={pending}><span>{time(run.createdAt)}</span><small>{statusLabels[run.status]} · {run.processed}/{run.maxTasks}</small></button>)}</nav>
-      <div className="account"><span className="avatar">{me.login.slice(0,1).toUpperCase()}</span><div><strong>{me.login}</strong><small>Личный профиль</small></div><button className="link-button" disabled={pending} onClick={()=>void act(async()=>{await client.logout();reset();})}>Выйти</button></div>
+      <div className="account"><span className="avatar">Я</span><div><strong>Общее пространство</strong><small>Без входа в приложение</small></div></div>
     </aside>
     <main className="main"><header className="page-heading"><div><span className="eyebrow">Ваш помощник</span><h1>Яндекс Янг</h1><p>Выберите проект. Помощник прочитает инструкцию и выполнит задания.</p></div><div className="quota"><strong>{me.quota.remaining}<span> / {me.quota.limit}</span></strong><small>AI-запросов до {time(me.quota.resetsAt)}</small></div></header>
       {error&&<div role="alert" className="notice error global-error">{error}<button className="link-button" onClick={()=>setError(null)} aria-label="Закрыть сообщение">×</button></div>}
-      <section className="browser-controls" aria-label="Подключение Янг"><div><span className={`dot ${ready?'online':''}`}/><strong role="status">{browser?authLabels[browser.yang.state]:'Проверяем подключение Янг'}</strong><p>{browser?.yang.message??'Вход и одноразовый код вводятся в форме Яндекса. Успешный вход определится автоматически.'}</p></div><div className="button-row">
-        {manual?<button disabled={pending} onClick={()=>void act(async()=>setBrowser(await client.exitManual()))}>Завершить ручное управление</button>:<button disabled={pending||(active&&!paused)} onClick={()=>void connect()}>{ready?'Открыть Янг':'Подключить Янг'}</button>}
+      <section className="browser-controls" aria-label="Подключение Янг"><div><span className={`dot ${ready?'online':''}`}/><strong role="status">{browser?authLabels[browser.yang.state]:'Проверяем подключение Янг'}</strong><p>{browser?.yang.message??(manual&&ready?'Завершите ручное управление, чтобы обновить каталог проектов.':'Вход и одноразовый код вводятся в форме Яндекса. Успешный вход определится автоматически.')}</p></div><div className="button-row">
+        {manual?<button disabled={pending} onClick={()=>void act(async()=>setBrowser(await client.exitManual()))}>Завершить ручное управление</button>:<button disabled={pending||!control||(active&&!paused)} onClick={()=>void connect(controlInUse)}>{controlInUse?'Перехватить управление':ready?'Открыть Янг':'Подключить Янг'}</button>}
       </div></section>
-      {manual&&browser?.generation&&<RemoteBrowser generation={browser.generation}/>}
-      {selection?<SelectionPanel catalogue={catalogue} selection={selection} onChange={value=>{setSelection(value);setSaved(false);}} onSave={()=>void save()} onRefresh={()=>void act(async()=>setCatalogue(await client.refreshCatalogue()))} busy={pending} canRefresh={Boolean(ready&&!active&&!manual)} valid={validSelection} saved={saved} active={active}/>:<p role="status" className="notice">Загружаем настройки выбора…</p>}
+      {controlInUse&&<p role="status" className="notice">Браузер управляется из другой вкладки или браузера. Перехват отключит прежнее подключение и откроет управление здесь.</p>}
+      {manual&&!connectingScreen&&browser?.generation&&<RemoteBrowser key={connection} generation={browser.generation} controlId={client.controlId} reconnecting={pending} onReconnect={()=>void connect()}/>}
+      {selection?<SelectionPanel catalogue={catalogue} selection={selection} onChange={value=>{setSelection(value);setSaved(false);}} onSave={()=>void save()} onRefresh={()=>void act(async()=>setCatalogue(await client.refreshCatalogue()))} busy={pending} canRefresh={Boolean(ready&&!active&&browser?.mode!=='MANUAL')} valid={validSelection} saved={saved} active={active}/>:<p role="status" className="notice">Загружаем настройки выбора…</p>}
       <section className="run-toolbar" aria-label="Управление запуском"><div><span className="section-label">Новый запуск</span><p>После запуска ответы отправляются автоматически, целыми наборами.</p></div><label className="limit-field">Наборов максимум<input type="number" min={1} max={50} value={Number.isNaN(limit)?'':limit} onChange={event=>setLimit(event.target.valueAsNumber)} disabled={pending||active}/></label><button className="primary" disabled={pending||!canStart} onClick={()=>void start()}>Запустить</button></section>
       {activeRun&&view?.id!==activeRun.id&&<button className="active-run-link" disabled={pending} onClick={()=>{revision.current++;setRunId(activeRun.id);setView(null);}}>Перейти к активному запуску</button>}
       {view?<section className="run-card" aria-label="Состояние запуска"><header className="run-heading"><div><span className={`status-pill ${view.status==='UNKNOWN'||view.status==='FAILED'?'warning':''}`}>{statusLabels[view.status]}</span><span className="progress-label">Отправлено наборов: {view.processed} из {view.maxTasks}</span></div><div className="button-row">

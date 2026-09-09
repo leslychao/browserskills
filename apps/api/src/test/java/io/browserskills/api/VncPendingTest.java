@@ -22,7 +22,7 @@ class VncPendingTest {
     when(store.user(user)).thenReturn(new Store.User(user, "alice", "hash", true, 1));
     var worker = mock(WorkerClient.class);
     var leases = new ManualLeases(Clock.systemUTC());
-    leases.acquire(user, 1, "session", "gen", Instant.now().plusSeconds(60));
+    leases.acquire(user, 1, "session", "gen", Instant.now().plusSeconds(60), false);
     var accepted = new CountDownLatch(1);
     var eof = new CompletableFuture<Boolean>();
     var socketRef = new AtomicReference<Socket>();
@@ -75,6 +75,13 @@ class VncPendingTest {
         var handler = (WebSocketHandler) ctor.newInstance(proxy);
         handler.afterConnectionEstablished(browser);
         assertTrue(accepted.await(2, TimeUnit.SECONDS));
+        var duplicate = mock(WebSocketSession.class);
+        when(duplicate.getAttributes()).thenReturn(Map.of("user", user, "session", "session"));
+        when(duplicate.getId()).thenReturn("duplicate-socket");
+        when(duplicate.isOpen()).thenReturn(true);
+        handler.afterConnectionEstablished(duplicate);
+        verify(duplicate).close(CloseStatus.POLICY_VIOLATION.withReason("VIEW_ALREADY_CONNECTED"));
+        verify(browser, never()).close(any());
         open.set(false);
         handler.afterConnectionClosed(browser, CloseStatus.NORMAL);
         assertTrue(eof.get(2, TimeUnit.SECONDS));

@@ -282,40 +282,98 @@ public class InferenceClient {
                         .filter(f -> !SnapshotValidation.empty(f.value()))
                         .toList())));
     content.add(text("ANSWER EXACTLY THESE FIELDS: " + json.writeValueAsString(fields)));
-    var value = Map.of("anyOf", List.of(string(), array(string()), Map.of("type", "number")));
-    var fieldSchema =
-        object(
-            Map.of(
-                "partId",
-                Map.of("const", part.id()),
-                "fieldId",
-                Map.of(
-                    "type",
-                    "string",
-                    "enum",
-                    fields.stream().map(Contracts.TaskField::id).toList()),
-                "value",
-                value),
-            List.of("partId", "fieldId", "value"));
+    var alternatives =
+        fields.stream()
+            .map(
+                field ->
+                    object(
+                        Map.of(
+                            "partId",
+                            Map.of("const", part.id()),
+                            "fieldId",
+                            Map.of("const", field.id()),
+                            "value",
+                            answerValueSchema(field)),
+                        List.of("partId", "fieldId", "value")))
+            .toList();
     var schema =
-        object(
-            Map.of(
-                "decision",
-                Map.of("enum", List.of("ANSWER", "ABSTAIN")),
-                "answers",
-                array(fieldSchema),
-                "reason",
-                Map.of("type", List.of("string", "null"))),
-            List.of("decision", "answers", "reason"));
+        Map.of(
+            "anyOf",
+            List.of(
+                object(
+                    Map.of(
+                        "decision",
+                        Map.of("const", "ANSWER"),
+                        "answers",
+                        Map.of(
+                            "type",
+                            "array",
+                            "items",
+                            Map.of("anyOf", alternatives),
+                            "minItems",
+                            fields.size(),
+                            "maxItems",
+                            fields.size()),
+                        "reason",
+                        Map.of("type", List.of("string", "null"), "maxLength", 1000)),
+                    List.of("decision", "answers", "reason")),
+                object(
+                    Map.of(
+                        "decision",
+                        Map.of("const", "ABSTAIN"),
+                        "answers",
+                        Map.of("type", "array", "items", Map.of("type", "object"), "maxItems", 0),
+                        "reason",
+                        Map.of("type", "string", "minLength", 1, "maxLength", 1000)),
+                    List.of("decision", "answers", "reason"))));
     return ask(
         "Answer only the requested next-stage fields according to all compiled rules and original"
             + " selected sources. Include every requested field exactly once; never change earlier"
-            + " stages. If any material or instruction is unclear, return ABSTAIN with no answers"
-            + " and explain why.",
+            + " stages. Copy partId and fieldId exactly. SINGLE_CHOICE value is one option ID as a"
+            + " JSON string; MULTI_CHOICE value is an array of distinct option IDs. Use option IDs,"
+            + " never labels, displayed ratings or numeric positions. NUMBER value is a JSON"
+            + " number; TEXT value is a JSON string within maxLength. Respect every numeric bound."
+            + " If any material or instruction is unclear, return ABSTAIN with an empty answers"
+            + " array and explain why.",
         content,
         schema,
         Contracts.AnswerSet.class,
         deadline);
+  }
+
+  private static Map<String, Object> answerValueSchema(Contracts.TaskField field) {
+    var schema = new LinkedHashMap<String, Object>();
+    switch (field.kind()) {
+      case "SINGLE_CHOICE" -> {
+        schema.put("type", "string");
+        schema.put("enum", field.options().stream().map(Contracts.Option::id).toList());
+      }
+      case "MULTI_CHOICE" -> {
+        schema.put("type", "array");
+        schema.put(
+            "items",
+            Map.of(
+                "type",
+                "string",
+                "enum",
+                field.options().stream().map(Contracts.Option::id).toList()));
+        schema.put("uniqueItems", true);
+        schema.put("minItems", field.required() ? 1 : 0);
+        schema.put("maxItems", field.options().size());
+      }
+      case "NUMBER" -> {
+        schema.put("type", "number");
+        if (field.min() != null) schema.put("minimum", field.min());
+        if (field.max() != null) schema.put("maximum", field.max());
+      }
+      case "TEXT" -> {
+        schema.put("type", "string");
+        if (field.required()) schema.put("minLength", 1);
+        if (field.maxLength() != null) schema.put("maxLength", field.maxLength());
+      }
+      default -> throw ApiException.invalid();
+    }
+    return schema;
   }
 
   public Contracts.Mapping map(Contracts.TaskSet task, Duration timeout) {

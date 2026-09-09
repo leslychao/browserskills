@@ -29,6 +29,15 @@ async function setup(mode:YangFixtureMode='normal'){
 }
 
 describe('worker HTTP, generation and manual control',()=>{
+  it('does not open catalogue pages while a user owns manual control',async()=>{
+    const {owner,command}=await setup();await command({type:'OPEN'});await command({type:'ENTER_MANUAL'});
+    const before=owner.status();
+    for(const refresh of [false,true]){
+      const response=await command({type:'CATALOGUE',payload:{refresh}});
+      expect(response.status).toBe(409);expect(await response.json()).toMatchObject({code:'MANUAL_CONTROL_ACTIVE'});
+    }
+    expect(owner.status()).toEqual(before);expect((await command({type:'YANG_SESSION'})).status).toBe(200);
+  });
   it('closes admission before browser shutdown, rejects an unfinished OPEN body and closes only once',async()=>{
     const {owner,app,url}=await setup();
     let releaseClose!:()=>void;

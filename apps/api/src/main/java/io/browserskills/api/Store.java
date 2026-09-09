@@ -127,6 +127,26 @@ public class Store {
         r.getTimestamp("created_at").toInstant());
   }
 
+  /** One shared workspace: existing browser/profile history remains on its original ID. */
+  public User localWorkspace() {
+    var existing = firstWorkspace();
+    if (existing != null) return existing;
+    return tx.execute(
+        status -> {
+          db.execute("LOCK TABLE browser_assignments IN EXCLUSIVE MODE");
+          var concurrent = firstWorkspace();
+          return concurrent != null ? concurrent : user(provision("local", ""));
+        });
+  }
+
+  private User firstWorkspace() {
+    return first(
+        db.query(
+            "SELECT u.*,a.worker_id FROM users u JOIN browser_assignments a ON a.user_id=u.id ORDER"
+                + " BY a.worker_id LIMIT 1",
+            this::mapUser));
+  }
+
   public User findLogin(String login) {
     return first(
         db.query(
@@ -144,7 +164,7 @@ public class Store {
                     + " WHERE u.id=?",
                 this::mapUser,
                 id));
-    if (u == null || !u.enabled()) throw ApiException.unauthorized();
+    if (u == null) throw new ApiException(404, "NOT_FOUND", "Workspace not found.");
     return u;
   }
 
@@ -175,9 +195,8 @@ public class Store {
   }
 
   private void lockUser(UUID id) {
-    if (db.queryForList(
-            "SELECT id FROM users WHERE id=? AND enabled=true FOR UPDATE", UUID.class, id)
-        .isEmpty()) throw ApiException.unauthorized();
+    if (db.queryForList("SELECT id FROM users WHERE id=? FOR UPDATE", UUID.class, id).isEmpty())
+      throw new ApiException(404, "NOT_FOUND", "Workspace not found.");
   }
 
   public Run owned(UUID user, UUID id) {

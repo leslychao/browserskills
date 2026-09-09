@@ -7,7 +7,7 @@ import { createWorkerServer } from '../../apps/browser/src/server.js';
 import { startYangFixture, type YangFixtureMode } from '../../apps/browser/test/yang-fixture.js';
 
 const directory=resolve(process.env.FIXTURE_DATA_DIR??'.cache/integration-worker');await mkdir(directory,{recursive:true});
-const fixture=await startYangFixture((process.env.FIXTURE_MODE??'normal') as YangFixtureMode);
+const fixture=await startYangFixture((process.env.FIXTURE_MODE??'normal') as YangFixtureMode,process.env.FIXTURE_SITE_PORT?{port:Number(process.env.FIXTURE_SITE_PORT),host:'0.0.0.0'}:{});
 const owner=new BrowserOwner({workerId:process.env.FIXTURE_WORKER_ID??'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media'),headless:process.env.FIXTURE_HEADLESS!=='false',startUrl:fixture.url,adapterOptions:{origin:fixture.url,frameOrigin:fixture.url,mediaOrigins:[fixture.url],instructionOrigins:[fixture.url]},verificationTimeoutMs:500});
 const token=process.env.FIXTURE_WORKER_TOKEN??'fixture-only-token-not-a-production-secret-123456789';
 const application=createWorkerServer(owner,token);

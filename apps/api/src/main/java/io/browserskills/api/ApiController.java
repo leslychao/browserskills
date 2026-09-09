@@ -5,11 +5,6 @@ import java.time.*;
 import java.util.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.*;
-import org.springframework.security.authentication.*;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
-import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,34 +14,17 @@ public class ApiController {
   private final Store store;
   private final Orchestrator runs;
   private final Materials materials;
-  private final AuthenticationManager auth;
-  private final SessionAuthenticationStrategy strategy;
-  private final SecurityContextRepository contexts;
-  private final LoginRateLimiter limiter;
   private final Clock clock;
 
-  public ApiController(
-      Store store,
-      Orchestrator runs,
-      Materials materials,
-      AuthenticationManager auth,
-      SessionAuthenticationStrategy strategy,
-      SecurityContextRepository contexts,
-      LoginRateLimiter limiter,
-      Clock clock) {
+  public ApiController(Store store, Orchestrator runs, Materials materials, Clock clock) {
     this.store = store;
     this.runs = runs;
     this.materials = materials;
-    this.auth = auth;
-    this.strategy = strategy;
-    this.contexts = contexts;
-    this.limiter = limiter;
     this.clock = clock;
   }
 
-  static UUID user(Authentication auth) {
-    if (auth == null) throw ApiException.unauthorized();
-    return UUID.fromString(auth.getName());
+  private UUID workspace() {
+    return store.localWorkspace().id();
   }
 
   @GetMapping("/health/live")
@@ -54,143 +32,115 @@ public class ApiController {
     return Map.of("status", "UP");
   }
 
-  @GetMapping("/api/auth/csrf")
+  @GetMapping("/api/csrf")
   Map<String, String> csrf(CsrfToken token) {
     return Map.of("token", token.getToken(), "headerName", token.getHeaderName());
   }
 
-  @PostMapping("/api/auth/login")
-  Contracts.UserView login(
-      @RequestBody Contracts.LoginRequest body,
-      HttpServletRequest request,
-      HttpServletResponse response) {
-    if (body.login() == null
-        || !body.login().matches("[a-zA-Z0-9_.@-]{1,128}")
-        || body.password() == null
-        || body.password().isEmpty()
-        || body.password().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72)
-      throw ApiException.invalid();
-    limiter.check(body.login(), request.getRemoteAddr());
-    Authentication authenticated;
-    try {
-      authenticated =
-          auth.authenticate(
-              UsernamePasswordAuthenticationToken.unauthenticated(body.login(), body.password()));
-    } catch (org.springframework.security.core.AuthenticationException e) {
-      throw new ApiException(401, "INVALID_CREDENTIALS", "Login or password is incorrect.");
-    }
-    var old = request.getSession(false);
-    if (old != null) runs.logout(user(authenticated), old.getId());
-    strategy.onAuthentication(authenticated, request, response);
-    var context = SecurityContextHolder.createEmptyContext();
-    context.setAuthentication(authenticated);
-    SecurityContextHolder.setContext(context);
-    contexts.saveContext(context, request, response);
-    request.getSession().setAttribute("authenticatedAt", clock.instant());
-    var u = store.user(user(authenticated));
-    return new Contracts.UserView(u.id(), u.login());
-  }
-
-  @PostMapping("/api/auth/logout")
-  ResponseEntity<Void> logout(Authentication auth, HttpServletRequest request) {
-    var session = request.getSession(false);
-    if (session != null) {
-      runs.logout(user(auth), session.getId());
-      session.invalidate();
-    }
-    SecurityContextHolder.clearContext();
-    return ResponseEntity.noContent().build();
-  }
-
   @GetMapping("/api/me")
-  Contracts.Me me(Authentication auth) {
-    var u = store.user(user(auth));
+  Contracts.Me me() {
+    var u = store.user(workspace());
     return new Contracts.Me(u.id(), u.login(), store.quota(u.id()));
   }
 
   @GetMapping("/api/browser")
-  Contracts.BrowserStatus browser(Authentication auth) {
-    return runs.browser(user(auth), false);
+  Contracts.BrowserStatus browser() {
+    return runs.browser(workspace(), false);
   }
 
   @PostMapping("/api/browser")
-  Contracts.BrowserStatus open(Authentication auth) {
-    return runs.browser(user(auth), true);
+  Contracts.BrowserStatus open() {
+    return runs.browser(workspace(), true);
+  }
+
+  @GetMapping("/api/browser/manual-control")
+  ManualLeases.Status controlStatus(
+      HttpServletRequest request, @RequestHeader("X-Browser-Control") UUID controlId) {
+    return runs.manualStatus(
+        workspace(), ManualLeases.controller(request.getSession(true).getId(), controlId));
   }
 
   @PostMapping("/api/browser/manual-control")
-  Contracts.BrowserStatus control(Authentication auth, HttpServletRequest request) {
-    var session = request.getSession(false);
+  Contracts.BrowserStatus control(
+      HttpServletRequest request,
+      @RequestHeader("X-Browser-Control") UUID controlId,
+      @RequestParam(defaultValue = "false") boolean takeOver) {
+    var session = request.getSession(true);
     return runs.manual(
-        user(auth),
-        session.getId(),
-        ((Instant) session.getAttribute("authenticatedAt")).plusSeconds(3600),
-        true);
+        workspace(),
+        ManualLeases.controller(session.getId(), controlId),
+        clock.instant().plusSeconds(3600),
+        true,
+        takeOver);
   }
 
   @DeleteMapping("/api/browser/manual-control")
-  Contracts.BrowserStatus release(Authentication auth, HttpServletRequest request) {
-    return runs.manual(user(auth), request.getSession(false).getId(), null, false);
+  Contracts.BrowserStatus release(
+      HttpServletRequest request, @RequestHeader("X-Browser-Control") UUID controlId) {
+    return runs.manual(
+        workspace(),
+        ManualLeases.controller(request.getSession(true).getId(), controlId),
+        null,
+        false,
+        false);
   }
 
   @PostMapping("/api/runs")
-  Contracts.RunView start(Authentication auth, @RequestBody Contracts.StartRun request) {
-    return runs.start(user(auth), request);
+  Contracts.RunView start(@RequestBody Contracts.StartRun request) {
+    return runs.start(workspace(), request);
   }
 
   @GetMapping("/api/runs")
-  List<Contracts.RunSummary> list(Authentication auth) {
-    return runs.list(user(auth));
+  List<Contracts.RunSummary> list() {
+    return runs.list(workspace());
   }
 
   @GetMapping("/api/runs/{id}")
-  Contracts.RunView get(Authentication auth, @PathVariable UUID id) {
-    return runs.view(user(auth), id);
+  Contracts.RunView get(@PathVariable UUID id) {
+    return runs.view(workspace(), id);
   }
 
   @PostMapping("/api/runs/{id}/resume")
-  Contracts.RunView resume(Authentication auth, @PathVariable UUID id) {
-    return runs.resume(user(auth), id);
+  Contracts.RunView resume(@PathVariable UUID id) {
+    return runs.resume(workspace(), id);
   }
 
   @GetMapping("/api/yang/session")
-  Contracts.YangSession yangSession(Authentication auth) {
-    return runs.session(user(auth));
+  Contracts.YangSession yangSession() {
+    return runs.session(workspace());
   }
 
   @GetMapping("/api/yang/catalogue")
-  Contracts.Catalogue catalogue(Authentication auth) {
-    return runs.catalogue(user(auth), false);
+  Contracts.Catalogue catalogue() {
+    return runs.catalogue(workspace(), false);
   }
 
   @PostMapping("/api/yang/catalogue/refresh")
-  Contracts.Catalogue refreshCatalogue(Authentication auth) {
-    return runs.catalogue(user(auth), true);
+  Contracts.Catalogue refreshCatalogue() {
+    return runs.catalogue(workspace(), true);
   }
 
   @GetMapping("/api/yang/selection")
-  Contracts.SelectionSettings selection(Authentication auth) {
-    return store.selection(user(auth));
+  Contracts.SelectionSettings selection() {
+    return store.selection(workspace());
   }
 
   @PutMapping("/api/yang/selection")
-  Contracts.SelectionSettings selection(
-      Authentication auth, @RequestBody Contracts.SelectionSettings settings) {
-    return store.selection(user(auth), settings);
+  Contracts.SelectionSettings selection(@RequestBody Contracts.SelectionSettings settings) {
+    return store.selection(workspace(), settings);
   }
 
   @PostMapping("/api/runs/{id}/stop")
-  Contracts.RunView stop(Authentication auth, @PathVariable UUID id) {
-    return runs.stop(user(auth), id);
+  Contracts.RunView stop(@PathVariable UUID id) {
+    return runs.stop(workspace(), id);
   }
 
   @GetMapping("/api/runs/{id}/media/{assetId}")
   ResponseEntity<byte[]> media(
-      Authentication auth,
       @PathVariable UUID id,
       @PathVariable String assetId,
       @RequestHeader(value = "Range", required = false) String range) {
-    store.owned(user(auth), id);
+    store.owned(workspace(), id);
     var material = materials.asset(id, assetId);
     return MediaRanges.response(material.bytes(), material.asset().mimeType(), range);
   }

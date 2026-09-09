@@ -26,6 +26,22 @@ def system_prompt():
     return PROMPT_PATH.read_text(encoding='utf-8').strip()
 
 
+def answer_prompt():
+    return system_prompt() + '\n' + (
+        'Answer every required field exactly once in every supplied part according to the complete '
+        'project instruction and that part\'s original materials. Return decision ANSWER when all '
+        'required fields can be answered. Each answer uses the provided partId and fieldId exactly. '
+        'For SINGLE_CHOICE, value is the selected option.id as a JSON string, never its label or '
+        'position. For MULTI_CHOICE, value is a JSON array of distinct selected option.id strings, '
+        'never a scalar or labels. For NUMBER, value is a JSON number without quotes. For TEXT, '
+        'value is a JSON string containing the requested text. Preserve the field limits. '
+        'If any required material or instruction is unclear or the task is unsupported by the '
+        'system policy, return decision ABSTAIN with an empty answers array and a nonempty reason. '
+        'Never combine ABSTAIN with answers. Do not invent a prohibited request that is absent from '
+        'the actual task; apply the system policy to the supplied task and materials.'
+    )
+
+
 def bounded_text(value, maximum, empty=False):
     return isinstance(value, str) and (empty or bool(value.strip())) and len(value) <= maximum
 
@@ -234,6 +250,47 @@ def original_media(root, media):
     return data
 
 
+def answer_schema(case):
+    def object_schema(properties):
+        return {'type': 'object', 'properties': properties, 'required': list(properties),
+                'additionalProperties': False}
+
+    alternatives = []
+    required = 0
+    for part in case['parts']:
+        for field in part['fields']:
+            required += field['required']
+            choice = {'type': 'string', 'enum': [option['id'] for option in field['options']]}
+            if field['kind'] == 'SINGLE_CHOICE':
+                value = choice
+            elif field['kind'] == 'MULTI_CHOICE':
+                value = {'type': 'array', 'items': choice, 'uniqueItems': True,
+                         'minItems': 1 if field['required'] else 0, 'maxItems': len(field['options'])}
+            elif field['kind'] == 'NUMBER':
+                value = {'type': 'number'}
+                if field['min'] is not None:
+                    value['minimum'] = field['min']
+                if field['max'] is not None:
+                    value['maximum'] = field['max']
+            else:
+                value = {'type': 'string', 'minLength': 1 if field['required'] else 0,
+                         'maxLength': field['maxLength'] or 16384}
+            alternatives.append(object_schema({'partId': {'const': part['id']},
+                                               'fieldId': {'const': field['id']}, 'value': value}))
+    answered = object_schema({
+        'decision': {'const': 'ANSWER'},
+        'answers': {'type': 'array', 'minItems': max(1, required), 'maxItems': len(alternatives),
+                    'items': {'anyOf': alternatives}},
+        'reason': {'anyOf': [{'type': 'string', 'maxLength': 4096}, {'type': 'null'}]},
+    })
+    abstained = object_schema({
+        'decision': {'const': 'ABSTAIN'},
+        'answers': {'type': 'array', 'maxItems': 0},
+        'reason': {'type': 'string', 'minLength': 1, 'maxLength': 4096},
+    })
+    return {'anyOf': [answered, abstained]}
+
+
 def request_body(case, root, *, normalize_audio=True, deadline=None):
     validate_case(case)
     content = [{'type': 'text', 'text': 'PROJECT INSTRUCTIONS (complete synthetic instruction):\n' + case['instruction']}]
@@ -257,17 +314,9 @@ def request_body(case, root, *, normalize_audio=True, deadline=None):
                     data = normalized_audio(data, asset['durationMs'], timeout=remaining)
                 content.append({'type': 'input_audio', 'input_audio': {'data': base64.b64encode(data).decode('ascii'), 'format': 'wav'}})
         content.append({'type': 'text', 'text': 'ANSWER EXACTLY THESE FIELDS IN PART ' + part['id'] + ':\n' + json.dumps(part['fields'], ensure_ascii=False)})
-    value_schema = {'anyOf': [{'type': 'string', 'maxLength': 16384}, {'type': 'number'},
-                              {'type': 'array', 'maxItems': 100, 'items': {'type': 'string', 'maxLength': 256}}]}
-    schema = {'type': 'object', 'properties': {'decision': {'type': 'string', 'enum': ['ANSWER', 'ABSTAIN']},
-              'answers': {'type': 'array', 'maxItems': sum(len(part['fields']) for part in case['parts']), 'items': {
-                  'type': 'object', 'properties': {'partId': {'type': 'string'}, 'fieldId': {'type': 'string'}, 'value': value_schema},
-                  'required': ['partId', 'fieldId', 'value'], 'additionalProperties': False}},
-              'reason': {'anyOf': [{'type': 'string', 'maxLength': 4096}, {'type': 'null'}]}},
-              'required': ['decision', 'answers', 'reason'], 'additionalProperties': False}
     return {'model': 'Qwen2.5-Omni-7B', 'stream': False, 'temperature': 0, 'max_tokens': 2048, 'cache_prompt': False,
-            'messages': [{'role': 'system', 'content': system_prompt()}, {'role': 'user', 'content': content}],
-            'response_format': {'type': 'json_schema', 'json_schema': {'name': 'answer_set', 'strict': True, 'schema': schema}}}
+            'messages': [{'role': 'system', 'content': answer_prompt()}, {'role': 'user', 'content': content}],
+            'response_format': {'type': 'json_schema', 'json_schema': {'name': 'answer_set', 'strict': True, 'schema': answer_schema(case)}}}
 
 
 def query(url, body, timeout=120):
@@ -408,7 +457,8 @@ def main():
     categories = summarize(rows)
     result = {'schemaVersion': 2, 'source': 'direct-model-diagnostic', 'productionPipeline': False, 'admissionEvidence': False,
               'measuredAtUtc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start)),
-              'systemPromptSha256': hashlib.sha256(system_prompt().encode('utf-8')).hexdigest(),
+              'systemPromptSha256': hashlib.sha256(answer_prompt().encode('utf-8')).hexdigest(),
+              'canonicalSystemPromptSha256': hashlib.sha256(system_prompt().encode('utf-8')).hexdigest(),
               'evaluationScriptSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'requestSettings': {'cache_prompt': False, 'temperature': 0, 'max_tokens': 2048,
                                   'answerContract': 'AnswerSet with scoped partId/fieldId; all fields must match gold for a correct whole set',

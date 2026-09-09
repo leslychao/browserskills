@@ -12,7 +12,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.server.*;
-import org.springframework.security.core.Authentication;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.config.annotation.*;
 import org.springframework.web.socket.handler.BinaryWebSocketHandler;
@@ -108,10 +107,13 @@ public class VncProxy implements WebSocketConfigurer {
                       || !(request instanceof ServletServerHttpRequest servlet)) return false;
                   var session = servlet.getServletRequest().getSession(false);
                   if (session == null) return false;
-                  UUID user = ApiController.user((Authentication) request.getPrincipal());
+                  UUID user = store.localWorkspace().id();
                   store.user(user);
-                  leases.lease(user, session.getId());
-                  attributes.put("session", session.getId());
+                  var controlId =
+                      UUID.fromString(servlet.getServletRequest().getParameter("controlId"));
+                  var controller = ManualLeases.controller(session.getId(), controlId);
+                  leases.lease(user, controller);
+                  attributes.put("session", controller);
                   attributes.put("user", user);
                   return true;
                 } catch (Exception e) {
@@ -129,21 +131,24 @@ public class VncProxy implements WebSocketConfigurer {
 
   private boolean valid(Link link) {
     try {
-      return link.browser().isOpen()
-          && leases.valid(link.user(), link.session())
-          && store.user(link.user()).enabled();
+      return link.browser().isOpen() && leases.valid(link.user(), link.session());
     } catch (Exception e) {
       return false;
     }
   }
 
   private void close(Link link) {
+    close(link, "CONTROL_ENDED");
+  }
+
+  private void close(Link link, String reason) {
     if (!link.closed.compareAndSet(false, true)) return;
     links.remove(link.browser().getId(), link);
     if (link.pending != null) link.pending.cancel(true);
     if (link.upstream() != null) link.upstream().abort();
     try {
-      link.browser().close(CloseStatus.POLICY_VIOLATION);
+      org.slf4j.LoggerFactory.getLogger(VncProxy.class).info("Browser view closed: {}", reason);
+      link.browser().close(CloseStatus.POLICY_VIOLATION.withReason(reason));
     } catch (Exception ignored) {
     }
   }
@@ -167,10 +172,10 @@ public class VncProxy implements WebSocketConfigurer {
                   + http.getRawPath());
       var pending = new Link(browser, session, user);
       synchronized (connectionLocks.computeIfAbsent(user, ignored -> new Object())) {
-        links.values().stream()
-            .filter(link -> link.user().equals(user))
-            .toList()
-            .forEach(VncProxy.this::close);
+        if (links.values().stream().anyMatch(link -> link.user().equals(user))) {
+          close(pending, "VIEW_ALREADY_CONNECTED");
+          return;
+        }
         if (!browser.isOpen() || !leases.valid(user, session)) return;
         links.put(browser.getId(), pending);
         pending.pending =
@@ -223,19 +228,19 @@ public class VncProxy implements WebSocketConfigurer {
                       public CompletionStage<?> onClose(
                           java.net.http.WebSocket socket, int code, String reason) {
                         var link = links.get(browser.getId());
-                        if (link != null) close(link);
+                        if (link != null) close(link, "UPSTREAM_CLOSED");
                         return null;
                       }
 
                       public void onError(java.net.http.WebSocket socket, Throwable error) {
                         var link = links.get(browser.getId());
-                        if (link != null) close(link);
+                        if (link != null) close(link, "UPSTREAM_ERROR");
                       }
                     });
         if (pending.closed.get() || !browser.isOpen()) pending.pending.cancel(true);
         pending.pending.exceptionally(
             error -> {
-              close(pending);
+              close(pending, "UPSTREAM_CONNECT_FAILED");
               return null;
             });
       }
@@ -256,12 +261,12 @@ public class VncProxy implements WebSocketConfigurer {
 
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
       var link = links.get(session.getId());
-      if (link != null) close(link);
+      if (link != null) close(link, "CLIENT_CLOSED_" + status.getCode());
     }
 
     public void handleTransportError(WebSocketSession session, Throwable error) {
       var link = links.get(session.getId());
-      if (link != null) close(link);
+      if (link != null) close(link, "CLIENT_TRANSPORT_ERROR");
     }
   }
 

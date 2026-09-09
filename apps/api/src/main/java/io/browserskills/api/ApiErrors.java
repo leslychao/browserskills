@@ -52,12 +52,16 @@ public class ApiErrors {
       case "UNRESOLVED_TASK", "SUBMIT_OUTCOME_UNKNOWN", "SUBMISSION_ALREADY_ATTEMPTED" ->
           "Результат отправки набора требует проверки в Янг; повторная отправка запрещена.";
       case "RUN_ACTIVE" -> "У вас уже есть активный запуск.";
+      case "MANUAL_CONTROL_ACTIVE" ->
+          "Завершите ручное управление перед обновлением каталога проектов.";
+      case "CONTROL_IN_USE" ->
+          "Браузер открыт в другой вкладке. Нажмите «Перехватить управление», чтобы продолжить здесь.";
+      case "CONTROL_REQUIRED" ->
+          "Ручное управление завершено или передано другой вкладке. Подключитесь снова.";
       case "RUN_NOT_PAUSED", "RUN_STOPPED" ->
           "Текущее состояние запуска не допускает это действие.";
-      case "INVALID_CREDENTIALS" -> "Неверный логин или пароль.";
       case "NOT_FOUND" -> "Ресурс не найден.";
       case "INVALID_REQUEST" -> "Проверьте параметры запроса.";
-      case "UNAUTHORIZED" -> "Войдите в приложение.";
       case "IDEMPOTENCY_CONFLICT" ->
           "Этот идентификатор запроса уже использован с другими параметрами.";
       default -> "Операция не завершена. Проверьте состояние запуска и серверного браузера.";
@@ -66,6 +70,7 @@ public class ApiErrors {
 
   @ExceptionHandler({
     org.springframework.http.converter.HttpMessageNotReadableException.class,
+    org.springframework.web.bind.MissingRequestHeaderException.class,
     org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class
   })
   ResponseEntity<Contracts.ApiError> invalid(Exception e) {

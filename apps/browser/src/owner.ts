@@ -105,7 +105,7 @@ export class BrowserOwner extends EventEmitter {
       case 'YANG_SESSION':
         if(!this.adapter)throw new WorkerError('BROWSER_CLOSED');this.yang=await this.adapter.session();return this.yang;
       case 'CATALOGUE':
-        if(!this.adapter)throw new WorkerError('BROWSER_CLOSED');return this.adapter.catalogue(command.payload.refresh);
+        if(!this.adapter)throw new WorkerError('BROWSER_CLOSED');if(this.mode==='MANUAL')throw new WorkerError('MANUAL_CONTROL_ACTIVE');return this.adapter.catalogue(command.payload.refresh);
       case 'INSTRUCTION':this.ensureRun(command);this.expireSnapshots(command.id);return this.adapter!.instruction(command.payload.poolId);
       case 'SELECT_PROJECT':this.ensureRun(command);this.yang=await this.adapter!.selectProject(command.payload.poolId);return this.status();
       case 'MAP_FIELDS':this.ensureRun(command);this.expireSnapshots(command.id);return this.adapter!.mapFields(command.payload);

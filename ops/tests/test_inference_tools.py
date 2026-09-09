@@ -51,7 +51,7 @@ class InferenceToolsTest(unittest.TestCase):
         value = case()
         original = copy.deepcopy(value)
         body = evaluation.request_body(value, Path('.'))
-        self.assertEqual(evaluation.system_prompt(), body['messages'][0]['content'])
+        self.assertTrue(body['messages'][0]['content'].startswith(evaluation.system_prompt()))
         encoded = json.dumps(body)
         self.assertIn('left', encoded)
         self.assertIn('right', encoded)
@@ -60,6 +60,45 @@ class InferenceToolsTest(unittest.TestCase):
         self.assertEqual(original, value)
         with mock.patch.object(evaluation, 'query', return_value=(answer(), .1)):
             self.assertEqual(answer(), evaluation.query_case('http://unused', value, Path('.'))[0])
+
+    def test_diagnostic_answer_purpose_explains_wire_values_and_refusal_semantics(self):
+        prompt = evaluation.request_body(case(), Path('.'))['messages'][0]['content']
+        self.assertTrue(prompt.startswith(evaluation.system_prompt() + '\n'))
+        for instruction in ('every required field exactly once', 'option.id', 'JSON array',
+                            'JSON number', 'JSON string', 'ABSTAIN', 'empty answers array'):
+            self.assertIn(instruction, prompt)
+
+    def test_answer_schema_rejects_refusal_answers_and_scopes_each_field_value_type(self):
+        value = case()
+        value['parts'][0]['fields'] += [field('multiple', 'MULTI_CHOICE'),
+                                       field('number', 'NUMBER', min=0, max=9),
+                                       field('text', 'TEXT', maxLength=20)]
+        value['expected'] += [{'partId': 'left', 'fieldId': 'multiple', 'value': ['blue-id']},
+                              {'partId': 'left', 'fieldId': 'number', 'value': 7},
+                              {'partId': 'left', 'fieldId': 'text', 'value': 'blue'}]
+        schema = evaluation.request_body(value, Path('.'))['response_format']['json_schema']['schema']
+        branches = {branch['properties']['decision']['const']: branch for branch in schema['anyOf']}
+        self.assertEqual({'ANSWER', 'ABSTAIN'}, set(branches))
+        refused = branches['ABSTAIN']['properties']['answers']
+        self.assertEqual('array', refused['type'])
+        self.assertEqual(0, refused['maxItems'])
+        responses = branches['ANSWER']['properties']['answers']
+        self.assertEqual(5, responses['minItems'])
+        self.assertEqual(5, responses['maxItems'])
+        alternatives = responses['items']['anyOf']
+        scoped = {(item['properties']['partId']['const'], item['properties']['fieldId']['const']): item
+                  for item in alternatives}
+        self.assertEqual({('left', 'choice'), ('right', 'choice'), ('left', 'multiple'),
+                          ('left', 'number'), ('left', 'text')}, set(scoped))
+        single = scoped['left', 'choice']['properties']['value']
+        self.assertEqual({'type': 'string', 'enum': ['blue-id', 'red-id']}, single)
+        multiple = scoped['left', 'multiple']['properties']['value']
+        self.assertEqual('array', multiple['type'])
+        self.assertEqual(single, multiple['items'])
+        number = scoped['left', 'number']['properties']['value']
+        self.assertEqual({'type': 'number', 'minimum': 0, 'maximum': 9}, number)
+        self.assertEqual({'type': 'string', 'minLength': 1, 'maxLength': 20},
+                         scoped['left', 'text']['properties']['value'])
 
     def test_one_wrong_or_missing_field_fails_the_whole_set(self):
         value = case()

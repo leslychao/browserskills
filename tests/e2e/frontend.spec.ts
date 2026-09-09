@@ -10,6 +10,7 @@ test('manual project, autonomous whole-set observation, instruction and unknown 
     const body=(value:unknown)=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
     if(path==='/api/me')return body(user);
     if(path==='/api/browser')return body({...browserStatus,mode:started?'AUTOMATION':'IDLE',runId:started?run.id:null});
+    if(path==='/api/browser/manual-control'&&method==='GET')return body({state:'AVAILABLE',expiresAt:null});
     if(path==='/api/yang/catalogue')return body(catalogue);
     if(path==='/api/yang/selection')return body(method==='PUT'?route.request().postDataJSON():selection);
     if(path==='/api/runs'){
@@ -20,7 +21,7 @@ test('manual project, autonomous whole-set observation, instruction and unknown 
       }
       const {current:_task,results:_results,...summary}=current;return body(started?[summary]:[]);
     }
-    if(path==='/api/auth/csrf')return body({token:'csrf-test',headerName:'X-CSRF-TOKEN'});
+    if(path==='/api/csrf')return body({token:'csrf-test',headerName:'X-CSRF-TOKEN'});
     if(path.endsWith('/media/audio-1')){
       const wav=Buffer.alloc(32044);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(16000,24);wav.writeUInt32LE(32000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(32000,40);
       return route.fulfill({contentType:'audio/wav',body:wav,headers:{'Accept-Ranges':'bytes'}});
@@ -53,9 +54,10 @@ test('automatic criteria persist across reload and fit a narrow viewport',async(
     const path=new URL(route.request().url()).pathname;
     if(path==='/api/me')return route.fulfill({json:user});
     if(path==='/api/browser')return route.fulfill({json:browserStatus});
+    if(path==='/api/browser/manual-control'&&route.request().method()==='GET')return route.fulfill({json:{state:'AVAILABLE',expiresAt:null}});
     if(path==='/api/yang/catalogue')return route.fulfill({json:catalogue});
     if(path==='/api/runs')return route.fulfill({json:[]});
-    if(path==='/api/auth/csrf')return route.fulfill({json:{token:'csrf',headerName:'X-CSRF-TOKEN'}});
+    if(path==='/api/csrf')return route.fulfill({json:{token:'csrf',headerName:'X-CSRF-TOKEN'}});
     if(path==='/api/yang/selection'){
       if(route.request().method()==='PUT')settings=route.request().postDataJSON();
       return route.fulfill({json:settings});
@@ -76,18 +78,12 @@ test('automatic criteria persist across reload and fit a narrow viewport',async(
   await page.screenshot({path:'.cache/yang-web-mobile.png',fullPage:true});
 });
 
-test('login form fits mobile and never restores a password after a failed sign-in',async({page})=>{
+test('connection failure has a retry action and no authentication form',async({page})=>{
   await page.setViewportSize({width:390,height:844});
-  await page.route('**/api/**',async route=>{
-    const path=new URL(route.request().url()).pathname;
-    if(path==='/api/auth/csrf')return route.fulfill({json:{token:'csrf',headerName:'X-CSRF-TOKEN'}});
-    return route.fulfill({status:401,json:{code:'AUTH_REQUIRED',message:'Неверный логин или пароль'}});
-  });
+  await page.route('**/api/**',route=>route.fulfill({status:503,json:{code:'UNAVAILABLE',message:'Сервер недоступен'}}));
   await page.goto('/');
-  await expect(page.getByRole('heading',{name:'Войти в BrowserSkills'})).toBeVisible();
-  await page.getByLabel('Логин',{exact:true}).fill('tester');await page.getByLabel('Пароль',{exact:true}).fill('test-password');
-  await page.getByRole('button',{name:'Войти',exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('Неверный логин');
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth',390);
-  await page.reload();await expect(page.getByLabel('Пароль',{exact:true})).toHaveValue('');
+  await expect(page.getByRole('alert')).toContainText('Сервер недоступен');
+  await expect(page.getByRole('button',{name:'Повторить подключение'})).toBeVisible();
+  await expect(page.getByLabel('Пароль',{exact:true})).toHaveCount(0);
+  await expect(page.getByLabel('Логин',{exact:true})).toHaveCount(0);
 });

@@ -5,49 +5,19 @@ import jakarta.servlet.http.*;
 import java.io.*;
 import java.time.*;
 import java.util.*;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 import tools.jackson.databind.json.JsonMapper;
 
-final class SessionGuard extends OncePerRequestFilter {
-  private final Store store;
-  private final ManualLeases leases;
-  private final Clock clock;
+final class RequestBodyLimit extends OncePerRequestFilter {
   private final JsonMapper json;
 
-  SessionGuard(Store store, ManualLeases leases, Clock clock, JsonMapper json) {
-    this.store = store;
-    this.leases = leases;
-    this.clock = clock;
+  RequestBodyLimit(JsonMapper json) {
     this.json = json;
   }
 
   protected void doFilterInternal(
       HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
-    var auth = SecurityContextHolder.getContext().getAuthentication();
-    if (auth != null && auth.isAuthenticated() && !"anonymousUser".equals(auth.getName())) {
-      var session = request.getSession(false);
-      boolean valid = false;
-      try {
-        valid =
-            session != null
-                && session.getAttribute("authenticatedAt") instanceof Instant at
-                && at.plusSeconds(3600).isAfter(clock.instant());
-        if (valid) store.user(UUID.fromString(auth.getName()));
-      } catch (Exception e) {
-        valid = false;
-      }
-      if (!valid) {
-        if (session != null) {
-          leases.revokeSession(session.getId());
-          session.invalidate();
-        }
-        SecurityContextHolder.clearContext();
-        SecurityConfiguration.error(response, 401, "SESSION_EXPIRED", "Sign in again.", json);
-        return;
-      }
-    }
     if (request.getContentLengthLong() > 32768) {
       SecurityConfiguration.error(
           response, 413, "REQUEST_TOO_LARGE", "Request body is too large.", json);

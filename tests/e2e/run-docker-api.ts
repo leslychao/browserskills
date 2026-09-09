@@ -73,23 +73,19 @@ try{
   const index=await request('/');assert.equal(index.status,200);assert.match(index.body,/<div id="root"/);
   assert.match(String(index.headers['content-security-policy']),/frame-ancestors 'none'/);
   const script=index.body.match(/src="(\/assets\/[^" ]+\.js)"/)?.[1];assert(script,'Production JS asset missing');assert.equal((await request(script)).status,200);
-  assert.equal((await request('/api/me')).status,401);
+  const workspace=JSON.parse((await request('/api/me')).body);assert.equal(workspace.login,'local');
   assert.equal((await request('/health/ready')).status,404,'Readiness must stay private');
   const readiness=JSON.parse(await command('docker',['exec',api,'curl','--fail','--silent','--max-time','10','http://127.0.0.1:8080/health/ready']));
   assert.equal(readiness.status,'DEGRADED');assert.equal(readiness.components.database,'UP');assert.equal(readiness.components.inference,'DOWN');assert.equal(readiness.manualBrowserAvailable,false);
   for(let i=1;i<=5;i++)assert.equal(readiness.components[`browser-${i}`],'DOWN');
-  await command('docker',['exec','-i',api,'java','-jar','/app/api.jar','--spring.main.web-application-type=none','--spring.profiles.active=admin','--create-user=smoke'],password+'\n');
-  assert.equal((await request('/api/auth/login','POST',{login:'smoke',password})).status,403,'CSRF is required');
-  const csrf=JSON.parse((await request('/api/auth/csrf')).body);const previousCookie=cookie;
-  const login=await request('/api/auth/login','POST',{login:'smoke',password},{[csrf.headerName]:csrf.token});assert.equal(login.status,200);assert.equal(JSON.parse(login.body).login,'smoke');assert.notEqual(cookie,previousCookie);
+  assert.equal((await request('/api/yang/catalogue/refresh','POST')).status,403,'CSRF is required');
+  const csrf=JSON.parse((await request('/api/csrf')).body);
+  assert.equal((await request('/api/auth/login','POST',{login:'unused',password:'unused'},{[csrf.headerName]:csrf.token})).status,404,'Old login endpoint must be removed');
   assert(cookies.some(value=>!/; Secure/i.test(value)&&/; HttpOnly/i.test(value)&&/SameSite=Lax/i.test(value)),'LAN HTTP session attributes incorrect');
-  assert.equal(JSON.parse((await request('/api/me')).body).login,'smoke');
-  const logoutCsrf=JSON.parse((await request('/api/auth/csrf')).body);
-  assert.equal((await request('/api/auth/logout','POST',undefined,{[logoutCsrf.headerName]:logoutCsrf.token})).status,204);
-  assert.equal((await request('/api/me')).status,401);
+  cookie='';assert.equal(JSON.parse((await request('/api/me')).body).id,workspace.id,'A new session sees the same workspace');
   assert.equal(await command('docker',['exec',api,'id','-u']),'10001');
   await command('docker',['exec',api,'ffmpeg','-version']);await command('docker',['exec',api,'ffprobe','-version']);
-  console.log('Production Docker API passed: non-root/read-only, PostgreSQL app role, LAN HTTP without certificates, embedded web assets, private readiness, HttpOnly/SameSite cookie/CSRF/login/logout and FFmpeg tools. Browser/model endpoints were deliberately unavailable.');
+  console.log('Production Docker API passed: non-root/read-only, PostgreSQL app role, shared workspace without login, LAN HTTP, embedded assets, private readiness, HttpOnly/SameSite cookie/CSRF and FFmpeg. Browser/model endpoints were deliberately unavailable.');
 }finally{
   for(const container of containers.toReversed())try{await command('docker',['rm','--force',container]);}catch(error){console.error('Fixture container cleanup failed:',error);}
   if(networkCreated)await command('docker',['network','rm',network]);
