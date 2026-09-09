@@ -1,8 +1,6 @@
 package io.browserskills.api;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Timestamp;
+import java.sql.*;
 import java.time.*;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,6 +10,18 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Repository
 public class Store {
+  public static final Set<String> ACTIVE =
+      Set.of(
+          "SELECTING",
+          "PREPARING",
+          "ANALYZING",
+          "FILLING",
+          "WAITING_FOR_AUTH",
+          "WAITING_FOR_USER",
+          "SUBMITTING");
+  private static final String ACTIVE_SQL =
+      "'SELECTING','PREPARING','ANALYZING','FILLING','WAITING_FOR_AUTH','WAITING_FOR_USER','SUBMITTING'";
+
   public record User(UUID id, String login, String passwordHash, boolean enabled, int workerId) {}
 
   public record Run(
@@ -23,19 +33,22 @@ public class Store {
       String generation,
       String errorCode,
       Instant createdAt,
-      Instant updatedAt) {}
+      Instant updatedAt,
+      Contracts.SelectionSettings selection,
+      Contracts.CatalogueItem selectedProject,
+      String selectionReason,
+      Contracts.InstructionProgress instructionProgress) {}
 
   public record Item(
       UUID id,
       UUID runId,
       int ordinal,
-      String projectId,
-      String taskId,
+      String poolId,
+      String suiteId,
       String snapshotHash,
       String instructionHash,
-      UUID nonce,
       String status,
-      String optionId,
+      Contracts.AnswerSet answer,
       String code,
       Instant createdAt) {}
 
@@ -57,7 +70,23 @@ public class Store {
     this.quota = quota;
   }
 
-  private User mapUser(ResultSet r, int ignored) throws SQLException {
+  private static <T> T first(List<T> rows) {
+    return rows.isEmpty() ? null : rows.getFirst();
+  }
+
+  private static String json(Object o) {
+    return Json.mapper().writeValueAsString(o);
+  }
+
+  private static <T> T read(String s, Class<T> c) {
+    return s == null ? null : Json.mapper().readValue(s, c);
+  }
+
+  private Timestamp now() {
+    return Timestamp.from(clock.instant());
+  }
+
+  private User mapUser(ResultSet r, int n) throws SQLException {
     return new User(
         r.getObject("id", UUID.class),
         r.getString("login"),
@@ -66,7 +95,7 @@ public class Store {
         r.getInt("worker_id"));
   }
 
-  private Run run(ResultSet r, int ignored) throws SQLException {
+  private Run run(ResultSet r, int n) throws SQLException {
     return new Run(
         r.getObject("id", UUID.class),
         r.getObject("user_id", UUID.class),
@@ -76,27 +105,26 @@ public class Store {
         r.getString("generation"),
         r.getString("error_code"),
         r.getTimestamp("created_at").toInstant(),
-        r.getTimestamp("updated_at").toInstant());
+        r.getTimestamp("updated_at").toInstant(),
+        read(r.getString("selection_json"), Contracts.SelectionSettings.class),
+        read(r.getString("selected_project_json"), Contracts.CatalogueItem.class),
+        r.getString("selection_reason"),
+        read(r.getString("instruction_progress_json"), Contracts.InstructionProgress.class));
   }
 
-  private Item item(ResultSet r, int ignored) throws SQLException {
+  private Item item(ResultSet r, int n) throws SQLException {
     return new Item(
         r.getObject("id", UUID.class),
         r.getObject("run_id", UUID.class),
         r.getInt("ordinal"),
-        r.getString("project_id"),
-        r.getString("task_id"),
+        r.getString("pool_id"),
+        r.getString("suite_id"),
         r.getString("snapshot_hash"),
         r.getString("instruction_hash"),
-        r.getObject("confirmation_nonce", UUID.class),
         r.getString("status"),
-        r.getString("option_id"),
+        read(r.getString("answer_json"), Contracts.AnswerSet.class),
         r.getString("code"),
         r.getTimestamp("created_at").toInstant());
-  }
-
-  private static <T> T first(List<T> rows) {
-    return rows.isEmpty() ? null : rows.getFirst();
   }
 
   public User findLogin(String login) {
@@ -123,7 +151,7 @@ public class Store {
   public UUID provision(String login, String passwordHash) {
     if (login == null || !login.matches("[a-zA-Z0-9_.@-]{1,128}")) throw ApiException.invalid();
     return tx.execute(
-        status -> {
+        s -> {
           db.execute("LOCK TABLE browser_assignments IN EXCLUSIVE MODE");
           var used = db.queryForList("SELECT worker_id FROM browser_assignments", Integer.class);
           int slot =
@@ -147,10 +175,9 @@ public class Store {
   }
 
   private void lockUser(UUID id) {
-    var rows =
-        db.queryForList(
-            "SELECT id FROM users WHERE id=? AND enabled=true FOR UPDATE", UUID.class, id);
-    if (rows.isEmpty()) throw ApiException.unauthorized();
+    if (db.queryForList(
+            "SELECT id FROM users WHERE id=? AND enabled=true FOR UPDATE", UUID.class, id)
+        .isEmpty()) throw ApiException.unauthorized();
   }
 
   public Run owned(UUID user, UUID id) {
@@ -174,26 +201,58 @@ public class Store {
   }
 
   public List<Run> activeRuns() {
-    return db.query(
-        "SELECT * FROM runs WHERE status IN"
-            + " ('PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING')",
-        this::run);
+    return db.query("SELECT * FROM runs WHERE status IN (" + ACTIVE_SQL + ")", this::run);
   }
 
   public boolean active(UUID user) {
     return db.queryForObject(
-            "SELECT count(*) FROM runs WHERE user_id=? AND status IN"
-                + " ('PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING')",
+            "SELECT count(*) FROM runs WHERE user_id=? AND status IN (" + ACTIVE_SQL + ")",
             Integer.class,
             user)
         > 0;
   }
 
+  public boolean manualAllowed(UUID user) {
+    return db.queryForObject(
+            "SELECT count(*) FROM runs WHERE user_id=? AND status IN"
+                + " ('SELECTING','PREPARING','ANALYZING','FILLING','SUBMITTING')",
+            Integer.class,
+            user)
+        == 0;
+  }
+
+  public Contracts.SelectionSettings selection(UUID user) {
+    user(user);
+    String s =
+        first(
+            db.queryForList(
+                "SELECT settings_json::text FROM selection_settings WHERE user_id=?",
+                String.class,
+                user));
+    return s == null
+        ? Contracts.SelectionSettings.defaults()
+        : read(s, Contracts.SelectionSettings.class);
+  }
+
+  public Contracts.SelectionSettings selection(UUID user, Contracts.SelectionSettings settings) {
+    user(user);
+    var value = SnapshotValidation.selection(settings);
+    db.update(
+        "INSERT INTO selection_settings(user_id,settings_json) VALUES(?,?::jsonb) ON"
+            + " CONFLICT(user_id) DO UPDATE SET settings_json=excluded.settings_json",
+        user,
+        json(value));
+    return value;
+  }
+
   public Created create(UUID user, Contracts.StartRun request) {
-    if (request.requestId() == null || request.maxTasks() < 1 || request.maxTasks() > 50)
-      throw ApiException.invalid();
+    if (request == null
+        || request.requestId() == null
+        || request.maxTasks() < 1
+        || request.maxTasks() > 50) throw ApiException.invalid();
+    var selection = SnapshotValidation.selection(request.selection());
     return tx.execute(
-        status -> {
+        s -> {
           lockUser(user);
           var old =
               first(
@@ -203,32 +262,69 @@ public class Store {
                       user,
                       request.requestId()));
           if (old != null) {
-            if (old.maxTasks() != request.maxTasks())
+            if (old.maxTasks() != request.maxTasks() || !old.selection().equals(selection))
               throw new ApiException(
                   409, "IDEMPOTENCY_CONFLICT", "Request id belongs to different parameters.");
             return new Created(old, false);
           }
           if (active(user)) throw new ApiException(409, "RUN_ACTIVE", "A run is already active.");
           UUID id = UUID.randomUUID();
-          var now = Timestamp.from(clock.instant());
           db.update(
-              "INSERT INTO runs(id,user_id,request_id,max_tasks,status,created_at,updated_at)"
-                  + " VALUES(?,?,?,?,'PREPARING',?,?)",
+              "INSERT INTO"
+                  + " runs(id,user_id,request_id,max_tasks,status,created_at,updated_at,selection_json)"
+                  + " VALUES(?,?,?,?,'SELECTING',?,?,?::jsonb)",
               id,
               user,
               request.requestId(),
               request.maxTasks(),
-              now,
-              now);
+              now(),
+              now(),
+              json(selection));
           return new Created(owned(user, id), true);
         });
   }
 
   public void generation(UUID user, UUID run, String generation) {
     db.update(
-        "UPDATE runs SET generation=?,updated_at=? WHERE id=? AND user_id=? AND status='PREPARING'",
+        "UPDATE runs SET generation=?,updated_at=? WHERE id=? AND user_id=? AND status IN"
+            + " ('SELECTING','WAITING_FOR_AUTH','WAITING_FOR_USER')",
         generation,
-        Timestamp.from(clock.instant()),
+        now(),
+        run,
+        user);
+  }
+
+  public boolean state(UUID user, UUID run, String expected, String state, String code) {
+    if (!ACTIVE.contains(state) && !Set.of("COMPLETED", "FAILED").contains(state))
+      throw new IllegalArgumentException();
+    return db.update(
+            "UPDATE runs SET status=?,error_code=?,updated_at=? WHERE id=? AND user_id=? AND"
+                + " status=?",
+            state,
+            code,
+            now(),
+            run,
+            user,
+            expected)
+        == 1;
+  }
+
+  public void selected(UUID user, UUID run, Contracts.CatalogueItem item, String reason) {
+    db.update(
+        "UPDATE runs SET selected_project_json=?::jsonb,selection_reason=?,updated_at=? WHERE id=?"
+            + " AND user_id=?",
+        json(item),
+        reason,
+        now(),
+        run,
+        user);
+  }
+
+  public void progress(UUID user, UUID run, Contracts.InstructionProgress progress) {
+    db.update(
+        "UPDATE runs SET instruction_progress_json=?::jsonb,updated_at=? WHERE id=? AND user_id=?",
+        json(progress),
+        now(),
         run,
         user);
   }
@@ -245,136 +341,110 @@ public class Store {
     return db.query("SELECT * FROM run_items WHERE run_id=? ORDER BY ordinal", this::item, run);
   }
 
-  public Item draft(UUID user, UUID run, Contracts.TaskSnapshot snapshot) {
+  public Item draft(UUID user, UUID run, Contracts.TaskSet snapshot) {
     return tx.execute(
-        status -> {
+        s -> {
           var r = locked(user, run);
-          if (!Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION").contains(r.status()))
+          if (!Set.of("SELECTING", "PREPARING", "ANALYZING", "FILLING").contains(r.status()))
             return null;
           int unresolved =
               db.queryForObject(
                   "SELECT count(*) FROM run_items i JOIN runs r ON r.id=i.run_id WHERE r.user_id=?"
-                      + " AND i.project_id=? AND i.task_id=? AND i.status IN"
-                      + " ('SUBMIT_INTENT','UNKNOWN')",
+                      + " AND i.pool_id=? AND i.suite_id=? AND i.status IN"
+                      + " ('SUBMIT_INTENT','UNKNOWN','SUBMITTED')",
                   Integer.class,
                   user,
-                  snapshot.projectId(),
-                  snapshot.taskId());
+                  snapshot.poolId(),
+                  snapshot.suiteId());
           if (unresolved > 0)
             throw new ApiException(
                 409,
                 "UNRESOLVED_TASK",
-                "Resolve the previous unknown submission in Yandex and open a different task.");
-          Item old = current(run);
-          if (old != null
-              && old.taskId().equals(snapshot.taskId())
-              && old.status().equals("SUBMITTED"))
-            throw new ApiException(
-                409, "TASK_NOT_ADVANCED", "The browser still shows the submitted task.");
-          UUID id = UUID.randomUUID(), nonce = UUID.randomUUID();
+                "This suite has already been sent or has an unknown outcome.");
+          var old = current(run);
           int ordinal = old == null ? 1 : old.ordinal() + 1;
+          UUID id = UUID.randomUUID();
           if (old != null && old.status().equals("DRAFT")) {
             ordinal = old.ordinal();
             db.update("DELETE FROM run_items WHERE id=? AND status='DRAFT'", old.id());
           }
           db.update(
               "INSERT INTO"
-                  + " run_items(id,run_id,ordinal,project_id,task_id,snapshot_hash,instruction_hash,confirmation_nonce,status,created_at)"
-                  + " VALUES(?,?,?,?,?,?,?,?,'DRAFT',?)",
+                  + " run_items(id,run_id,ordinal,pool_id,suite_id,snapshot_hash,instruction_hash,status,created_at)"
+                  + " VALUES(?,?,?,?,?,?,?,'DRAFT',?)",
               id,
               run,
               ordinal,
-              snapshot.projectId(),
-              snapshot.taskId(),
+              snapshot.poolId(),
+              snapshot.suiteId(),
               snapshot.snapshotHash(),
               snapshot.instruction().hash(),
-              nonce,
-              Timestamp.from(clock.instant()));
+              now());
           transition(run, "ANALYZING", null);
           return current(run);
         });
   }
 
-  public void awaiting(UUID user, UUID run, UUID item) {
-    tx.executeWithoutResult(
-        status -> {
+  public boolean intent(
+      UUID user, UUID run, UUID item, Contracts.TaskSet snapshot, Contracts.AnswerSet answer) {
+    SnapshotValidation.answers(snapshot, answer, true);
+    return tx.execute(
+        s -> {
           var r = locked(user, run);
           var i = current(run);
-          if (r.status().equals("ANALYZING") && i != null && i.id().equals(item))
-            transition(run, "AWAITING_CONFIRMATION", null);
-        });
-  }
-
-  public boolean duplicateConfirm(UUID user, UUID run, Contracts.Confirm c, String hash) {
-    owned(user, run);
-    var rows =
-        db.queryForList(
-            "SELECT confirm_hash FROM run_items WHERE run_id=? AND confirm_request_id=?",
-            String.class,
-            run,
-            c.requestId());
-    if (rows.isEmpty()) return false;
-    if (!rows.getFirst().equals(hash))
-      throw new ApiException(
-          409, "IDEMPOTENCY_CONFLICT", "Confirmation id belongs to different parameters.");
-    return true;
-  }
-
-  public boolean intent(UUID user, UUID run, Contracts.Confirm c, String hash) {
-    return tx.execute(
-        status -> {
-          var r = locked(user, run);
-          if (duplicateConfirm(user, run, c, hash)) return false;
-          Item i = current(run);
-          if (!r.status().equals("AWAITING_CONFIRMATION")
+          if (i != null && !i.status().equals("DRAFT")) return false;
+          if (!r.status().equals("FILLING")
               || i == null
-              || !i.status().equals("DRAFT")
-              || !i.taskId().equals(c.taskId())
-              || !i.snapshotHash().equals(c.snapshotHash())
-              || !i.instructionHash().equals(c.instructionHash())
-              || !i.nonce().toString().equals(c.confirmationNonce()))
-            throw new ApiException(
-                409,
-                "STALE_CONFIRMATION",
-                "Task or instructions changed. Review the current task.");
+              || !i.id().equals(item)
+              || !i.poolId().equals(snapshot.poolId())
+              || !i.suiteId().equals(snapshot.suiteId())
+              || !i.snapshotHash().equals(snapshot.snapshotHash())
+              || !i.instructionHash().equals(snapshot.instruction().hash()))
+            throw new ApiException(409, "STALE_TASK", "Task or instruction changed.");
           db.update(
-              "UPDATE run_items SET"
-                  + " status='SUBMIT_INTENT',option_id=?,confirm_request_id=?,confirm_hash=? WHERE"
-                  + " id=?",
-              c.optionId(),
-              c.requestId(),
-              hash,
-              i.id());
+              "UPDATE run_items SET status='SUBMIT_INTENT',answer_json=?::jsonb WHERE id=?",
+              json(answer),
+              item);
           transition(run, "SUBMITTING", null);
           return true;
         });
   }
 
+  public void updateDraft(UUID user, UUID run, UUID item, Contracts.TaskSet snapshot) {
+    db.update(
+        "UPDATE run_items SET snapshot_hash=?,instruction_hash=? WHERE id=? AND run_id=? AND"
+            + " status='DRAFT' AND EXISTS(SELECT 1 FROM runs WHERE id=? AND user_id=? AND"
+            + " status='FILLING')",
+        snapshot.snapshotHash(),
+        snapshot.instruction().hash(),
+        item,
+        run,
+        run,
+        user);
+  }
+
   public boolean finish(UUID user, UUID run, Contracts.SubmitResult result) {
     return tx.execute(
-        status -> {
+        s -> {
           var r = locked(user, run);
           var i = current(run);
           if (i == null || !i.status().equals("SUBMIT_INTENT")) return false;
           boolean success = Set.of("SUBMITTED", "COMPLETE").contains(result.outcome());
           String itemState =
-              success ? "SUBMITTED" : result.outcome().equals("REJECTED") ? "FAILED" : "UNKNOWN";
+              success ? "SUBMITTED" : "REJECTED".equals(result.outcome()) ? "FAILED" : "UNKNOWN";
           db.update(
               "UPDATE run_items SET status=?,code=? WHERE id=?", itemState, result.code(), i.id());
           if (success) db.update("UPDATE runs SET processed=processed+1 WHERE id=?", run);
           boolean next =
-              success
-                  && !result.outcome().equals("COMPLETE")
-                  && r.processed() + 1 < r.maxTasks()
-                  && r.status().equals("SUBMITTING");
+              success && r.processed() + 1 < r.maxTasks() && r.status().equals("SUBMITTING");
           String state =
               next
-                  ? "PREPARING"
+                  ? "SELECTING"
                   : success
-                      ? (r.status().equals("STOPPED") ? "STOPPED" : "COMPLETED")
-                      : itemState.equals("UNKNOWN")
+                      ? ("STOPPED".equals(r.status()) ? "STOPPED" : "COMPLETED")
+                      : "UNKNOWN".equals(itemState)
                           ? "UNKNOWN"
-                          : r.status().equals("STOPPED") ? "STOPPED" : "FAILED";
+                          : "STOPPED".equals(r.status()) ? "STOPPED" : "FAILED";
           transition(run, state, result.code());
           return next;
         });
@@ -382,49 +452,44 @@ public class Store {
 
   public void stop(UUID user, UUID run) {
     tx.executeWithoutResult(
-        status -> {
+        s -> {
           var r = locked(user, run);
-          if (Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION", "SUBMITTING")
-              .contains(r.status())) transition(run, "STOPPED", null);
+          if (ACTIVE.contains(r.status())) transition(run, "STOPPED", null);
         });
   }
 
   public void fail(UUID user, UUID run, String code) {
     tx.executeWithoutResult(
-        status -> {
+        s -> {
           var r = locked(user, run);
-          if (Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION").contains(r.status()))
+          if (ACTIVE.contains(r.status()) && !r.status().equals("SUBMITTING"))
             transition(run, "FAILED", code);
         });
   }
 
   private void transition(UUID run, String state, String code) {
     db.update(
-        "UPDATE runs SET status=?,error_code=?,updated_at=? WHERE id=?",
-        state,
-        code,
-        Timestamp.from(clock.instant()),
-        run);
+        "UPDATE runs SET status=?,error_code=?,updated_at=? WHERE id=?", state, code, now(), run);
   }
 
   public void reconcile() {
     tx.executeWithoutResult(
-        status -> {
+        s -> {
           db.update(
               "UPDATE run_items SET status='UNKNOWN',code='API_RESTARTED' WHERE"
                   + " status='SUBMIT_INTENT'");
           db.update(
               "UPDATE runs SET status=CASE WHEN EXISTS(SELECT 1 FROM run_items i WHERE"
                   + " i.run_id=runs.id AND i.status='UNKNOWN') THEN 'UNKNOWN' ELSE 'INTERRUPTED'"
-                  + " END,error_code='API_RESTARTED',updated_at=? WHERE status IN"
-                  + " ('PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING') OR"
-                  + " (status='STOPPED' AND EXISTS (SELECT 1 FROM run_items i WHERE"
+                  + " END,error_code='API_RESTARTED',updated_at=? WHERE status IN ("
+                  + ACTIVE_SQL
+                  + ") OR (status='STOPPED' AND EXISTS(SELECT 1 FROM run_items i WHERE"
                   + " i.run_id=runs.id AND i.status='UNKNOWN'))",
-              Timestamp.from(clock.instant()));
+              now());
           db.update(
               "UPDATE ai_usage SET status='UNKNOWN',error_code='API_RESTARTED',completed_at=? WHERE"
                   + " status='RESERVED'",
-              Timestamp.from(clock.instant()));
+              now());
         });
   }
 
@@ -447,9 +512,9 @@ public class Store {
         quota, used, Math.max(0, quota - used), start.plus(Duration.ofDays(1)));
   }
 
-  public boolean reserveAi(UUID user, UUID request, Contracts.TaskSnapshot snapshot) {
+  public boolean reserveAi(UUID user, UUID request, String snapshotHash, String instructionHash) {
     return tx.execute(
-        status -> {
+        s -> {
           lockUser(user);
           var old =
               db.queryForList(
@@ -458,13 +523,12 @@ public class Store {
                   user,
                   request);
           if (!old.isEmpty()) {
-            if (!old.getFirst().equals(snapshot.snapshotHash()))
+            if (!old.getFirst().equals(snapshotHash))
               throw new ApiException(409, "IDEMPOTENCY_CONFLICT", "Analysis id already used.");
             return false;
           }
           if (quota(user).remaining() < 1)
-            throw new ApiException(
-                429, "AI_QUOTA", "Daily analysis quota is exhausted. Select manually.");
+            throw new ApiException(429, "AI_QUOTA", "Daily inference quota is exhausted.");
           db.update(
               "INSERT INTO"
                   + " ai_usage(id,user_id,request_id,snapshot_hash,instruction_hash,status,created_at)"
@@ -472,9 +536,9 @@ public class Store {
               UUID.randomUUID(),
               user,
               request,
-              snapshot.snapshotHash(),
-              snapshot.instruction().hash(),
-              Timestamp.from(clock.instant()));
+              snapshotHash,
+              instructionHash,
+              now());
           return true;
         });
   }
@@ -487,7 +551,7 @@ public class Store {
         result,
         error,
         modelHash,
-        Timestamp.from(clock.instant()),
+        now(),
         user,
         request);
   }

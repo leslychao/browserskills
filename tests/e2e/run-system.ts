@@ -9,8 +9,7 @@ import { once } from 'node:events';
 import { build } from 'esbuild';
 import { BrowserOwner } from '../../apps/browser/src/owner.js';
 import { createWorkerServer } from '../../apps/browser/src/server.js';
-import { fixtureProfile } from '../../apps/browser/test/fixture-profile.js';
-import { startTestSite } from '../test-site/server.js';
+import { startYangFixture } from '../../apps/browser/test/yang-fixture.js';
 
 const root=resolve('.');
 const rfbMode=process.argv.includes('--rfb');
@@ -69,39 +68,48 @@ try{
   }
   if(!dbReady)throw new Error('PostgreSQL readiness timed out');
 
-  const sites:Array<Awaited<ReturnType<typeof startTestSite>>>=[];
+  const sites:Array<Awaited<ReturnType<typeof startYangFixture>>>=[];
   const workerPorts=[];
-  for(const [index,mode] of (['normal','lost','image','audio','instruction-audio'] as const).entries()){
-    const fixture=await startTestSite(mode);sites.push(fixture);cleanup.push(fixture.close);
-    const owner=new BrowserOwner({workerId:`browser-${index+1}`,profileDir:join(directory,`profile-${index}`),mediaDir:join(directory,`media-${index}`),headless:true,startUrl:fixture.url,profiles:[fixtureProfile(fixture.url)],verificationTimeoutMs:600});
+  for(const [index,mode] of (['normal','lost','voices','aspects','conditional'] as const).entries()){
+    const fixture=await startYangFixture(mode);sites.push(fixture);cleanup.push(fixture.close);
+    const owner=new BrowserOwner({workerId:`browser-${index+1}`,profileDir:join(directory,`profile-${index}`),mediaDir:join(directory,`media-${index}`),headless:true,startUrl:fixture.url,adapterOptions:{origin:fixture.url,frameOrigin:fixture.url,mediaOrigins:[fixture.url],instructionOrigins:[fixture.url]},verificationTimeoutMs:600});
     const app=createWorkerServer(owner,workerToken);workerPorts.push(await listen(app.server));
     cleanup.push(()=>owner.close());
   }
-  let analyses=0;let incompleteInstructions=0;let audioAnalyses=0;
+  let analyses=0;let instructionAnalyses=0;let audioAnalyses=0;
   const model=createServer(async(request,response)=>{
     if(request.method==='GET'&&request.url==='/health'){response.setHeader('Content-Type','application/json');response.end(JSON.stringify({status:'ok'}));return;}
-    if(request.method!=='POST'||request.url!=='/v1/chat/completions'){response.writeHead(404);response.end();return;}
+    if(request.method!=='POST'||!['/v1/chat/completions','/tokenize'].includes(request.url??'')){response.writeHead(404);response.end();return;}
     let source='';for await(const chunk of request){source+=chunk;if(source.length>8*1024*1024){response.writeHead(413);response.end();return;}}
-    const payload=JSON.parse(source);analyses++;
+    const payload=JSON.parse(source);
+    if(request.url==='/tokenize'){response.setHeader('Content-Type','application/json');response.end(JSON.stringify({tokens:Array.from({length:Math.ceil(String(payload.content??'').length/3)},(_,i)=>i)}));return;}
+    analyses++;
     const material=JSON.stringify(payload.messages);
     if(material.includes('"type":"input_audio"'))audioAnalyses++;
-    if(!material.includes('Read the whole question.')||!material.includes('Example: sky'))incompleteInstructions++;
-    const optionBlock=payload.messages[1].content.findLast((part:{type:string;text?:string})=>part.type==='text'&&part.text?.startsWith('AVAILABLE OPTIONS:\n'));
-    const options=JSON.parse(optionBlock.text.slice('AVAILABLE OPTIONS:\n'.length)) as Array<{id:string;label:string}>;
-    const answer=options.find(option=>option.label==='Blue');
-    if(!answer){response.writeHead(422);response.end();return;}
-    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({decision:'ANSWER',optionId:answer.id})}}]}));
+    const schema=payload.response_format.json_schema.schema.properties;
+    let answer:unknown;
+    if(schema.sourceId){instructionAnalyses++;answer={sourceId:schema.sourceId.const,rules:'Complete every required field. Preserve original sides. Overall preference precedes aspect ratings.',complete:true,contentOnlySpeech:false};}
+    else if(schema.sourceIds){answer={sourceIds:schema.sourceIds.items.enum};}
+    else if(schema.answers){
+      const fieldBlock=payload.messages[1].content.find((part:{text?:string})=>part.text?.startsWith('ANSWER EXACTLY THESE FIELDS: '));
+      const fields=JSON.parse(fieldBlock.text.slice('ANSWER EXACTLY THESE FIELDS: '.length));
+      const partId=schema.answers.items.properties.partId.const;
+      answer={decision:'ANSWER',reason:null,answers:fields.map((field:{id:string;kind:string;options:Array<{id:string}>;min:number|null})=>({partId,fieldId:field.id,value:field.kind==='NUMBER'?field.min??1:field.kind==='TEXT'?'Fixture explanation':field.kind==='MULTI_CHOICE'?field.options.map(o=>o.id):field.options[0].id}))};
+    }else{response.writeHead(422);response.end();return;}
+    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(answer)}}]}));
   });
   const modelPort=await listen(model);
   const diagnostics=createServer((request,response)=>{
     if(request.headers.authorization!==`Bearer ${diagnosticToken}`){response.writeHead(401);response.end();return;}
-    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({fixture:true,analyses,audioAnalyses,incompleteInstructions,sites:sites.map(site=>({current:site.state.current,submissions:site.state.submissions}))}));
+    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({fixture:true,analyses,audioAnalyses,instructionAnalyses,sites:sites.map(site=>({current:site.state.suite,reservations:site.state.reservations,submissions:site.state.submissions}))}));
   });
   const diagnosticsPort=await listen(diagnostics);
   const apiPort=await freePort();const webPort=await freePort();
   // A non-localhost origin exercises ordinary LAN HTTP; only Chromium resolves this fixture name.
   const publicOrigin=`http://${rfbMode?'rfb-http.test':'127.0.0.1'}:${webPort}`;
-  const environment:NodeJS.ProcessEnv={SPRING_DATASOURCE_URL:`jdbc:postgresql://127.0.0.1:${port}/browserskills`,SPRING_DATASOURCE_USERNAME:'postgres',SPRING_DATASOURCE_PASSWORD:password,API_INFERENCE_URL:`http://127.0.0.1:${modelPort}`,API_DEV_URL:`http://127.0.0.1:${apiPort}`,...(rfbMode?{__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:'rfb-http.test'}:{})};
+  const fixtureModelHash='a'.repeat(64);const fixtureEvidence=join(directory,'quality-evidence.fixture.json');
+  await writeFile(fixtureEvidence,JSON.stringify({modelSha256:fixtureModelHash,categories:['TEXT','IMAGE','SPEECH','SOUND_PROSODY'].map(category=>({category,total:25,correct:25,wholeSets:true,corpusSha256:'b'.repeat(64),evaluatedAt:new Date().toISOString()}))}));
+  const environment:NodeJS.ProcessEnv={SPRING_DATASOURCE_URL:`jdbc:postgresql://127.0.0.1:${port}/browserskills`,SPRING_DATASOURCE_USERNAME:'postgres',SPRING_DATASOURCE_PASSWORD:password,API_INFERENCE_URL:`http://127.0.0.1:${modelPort}`,API_DEV_URL:`http://127.0.0.1:${apiPort}`,API_MODEL_SHA256:fixtureModelHash,API_MATERIALS_DIR:join(directory,'materials'),API_QUALITY_EVIDENCE_PATH:fixtureEvidence,BROWSERSKILLS_DAILY_QUOTA:'1000',...(rfbMode?{__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:'rfb-http.test'}:{})};
   workerPorts.forEach((workerPort,index)=>{environment[`API_WORKER_${index+1}_URL`]=`http://127.0.0.1:${workerPort}`;environment[`worker_${index+1}_token`]=workerToken;});
   if(rfbMode){
     const entry=join(directory,'headed-worker.mjs');
@@ -124,7 +132,7 @@ try{
   process.stdout.write('Fixture system ready: real PostgreSQL + Spring + Chromium; stub model.\n');
   const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_URL:publicOrigin,SYSTEM_PASSWORD:password,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});
   test.processHandle.stdout!.on('data',chunk=>process.stdout.write(chunk));test.processHandle.stderr!.on('data',chunk=>process.stderr.write(chunk));
-  const deadline=setTimeout(()=>test.processHandle.kill(),240_000);
+  const deadline=setTimeout(()=>test.processHandle.kill(),480_000);
   process.exitCode=await test.done.finally(()=>clearTimeout(deadline));
   await writeFile(join(directory,'api.log'),api.output(),'utf8');
 }finally{

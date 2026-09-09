@@ -38,8 +38,15 @@ if($config.services.Contains('inference')){
     if($id){$inference=Get-ArchiveContainer $id;if($inference.Config.Labels['com.docker.compose.config-hash'] -ne $serviceHashes.inference){throw 'Effective source inference configuration differs from the running container.'};$model.present=$true;$model.containerId=$id;$model.image=$inference.Image;$config.services.inference.image=$inference.Image;$config.services.inference.Remove('build')}
 }
 $volumes=@()
+$ephemeral=@(Get-EphemeralArchiveMounts $config)
 foreach($service in $services){
     foreach($mount in $containers[$service].Mounts){
+        if($mount.Destination -in @('/data/materials','/data/media')){
+            $entry=@($ephemeral|Where-Object { $_.service -eq $service -and $_.target -eq $mount.Destination })
+            if($entry.Count -ne 1 -or $entry[0].name -ne $mount.Name){throw 'Ephemeral mount differs from the running configuration.'}
+            Assert-ArchiveOwner volume $mount.Name $plan.installId
+            continue
+        }
         if($mount.Destination -eq '/var/lib/postgresql/data'){Assert-ArchiveOwner volume $mount.Name $plan.installId;continue}
         if($mount.Destination -notin @('/data/profile','/run/secrets','/docker-entrypoint-initdb.d')){throw 'Unexpected persistent mount in the source deployment.'}
         Assert-ArchiveOwner volume $mount.Name $plan.installId
@@ -98,7 +105,7 @@ foreach($volume in $volumes){
         Record $volume.archive
     }finally{if($helper){Stop-ArchiveHelper $helper $operation}}
 }
-$manifest=@{schemaVersion=1;transport='docker-api';createdAtUtc=[DateTime]::UtcNow.ToString('o');sourceEndpoint=$DockerHost;sourceEngineId=(Invoke-RemoteDocker @('info','--format','{{.ID}}'));sourceProject=$plan.project;installId=$plan.installId;profilesStopped=$true;profilesVerifiedClean=$true;files=$files;volumes=$volumes;images=$images;model=$model;maximumArchiveMiB=$MaximumArchiveMiB}
+$manifest=@{schemaVersion=1;transport='docker-api';createdAtUtc=[DateTime]::UtcNow.ToString('o');sourceEndpoint=$DockerHost;sourceEngineId=(Invoke-RemoteDocker @('info','--format','{{.ID}}'));sourceProject=$plan.project;installId=$plan.installId;profilesStopped=$true;profilesVerifiedClean=$true;files=$files;volumes=$volumes;ephemeralVolumes=$ephemeral;images=$images;model=$model;maximumArchiveMiB=$MaximumArchiveMiB}
 # Final manifest is the commit marker. Every error leaves an explicitly incomplete backup.
 Write-Utf8 (Join-Path $destinationPath backup.json) ($manifest|ConvertTo-Json -Depth 15)
 Write-Output "Remote backup complete: $destinationPath"

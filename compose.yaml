@@ -52,8 +52,11 @@ services:
       API_WORKER_5_URL: http://browser-5:3000
       API_INFERENCE_URL: http://inference:8080
       API_MODEL_SHA256: ${API_MODEL_SHA256:-unverified}
+      API_MATERIALS_DIR: /data/materials
+      API_QUALITY_EVIDENCE_PATH: /app/config/quality-evidence.json
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError
     secrets: [db_password, worker_1_token, worker_2_token, worker_3_token, worker_4_token, worker_5_token]
+    volumes: [materials:/data/materials]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, inference, worker1, worker2, worker3, worker4, worker5]
@@ -121,32 +124,32 @@ services:
 
   browser-1:
     <<: *browser
-    environment: {WORKER_ID: browser-1, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
-    volumes: [profile1:/data/profile]
+    environment: {WORKER_ID: browser-1, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /data/media, DISPLAY: ':99'}
+    volumes: [profile1:/data/profile, browserMedia1:/data/media]
     secrets: [{source: worker_1_token, target: worker_token}]
     networks: [worker1]
   browser-2:
     <<: *browser
-    environment: {WORKER_ID: browser-2, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
-    volumes: [profile2:/data/profile]
+    environment: {WORKER_ID: browser-2, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /data/media, DISPLAY: ':99'}
+    volumes: [profile2:/data/profile, browserMedia2:/data/media]
     secrets: [{source: worker_2_token, target: worker_token}]
     networks: [worker2]
   browser-3:
     <<: *browser
-    environment: {WORKER_ID: browser-3, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
-    volumes: [profile3:/data/profile]
+    environment: {WORKER_ID: browser-3, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /data/media, DISPLAY: ':99'}
+    volumes: [profile3:/data/profile, browserMedia3:/data/media]
     secrets: [{source: worker_3_token, target: worker_token}]
     networks: [worker3]
   browser-4:
     <<: *browser
-    environment: {WORKER_ID: browser-4, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
-    volumes: [profile4:/data/profile]
+    environment: {WORKER_ID: browser-4, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /data/media, DISPLAY: ':99'}
+    volumes: [profile4:/data/profile, browserMedia4:/data/media]
     secrets: [{source: worker_4_token, target: worker_token}]
     networks: [worker4]
   browser-5:
     <<: *browser
-    environment: {WORKER_ID: browser-5, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /run/browser/media, DISPLAY: ':99'}
-    volumes: [profile5:/data/profile]
+    environment: {WORKER_ID: browser-5, WORKER_TOKEN_FILE: /run/secrets/worker_token, PROFILE_DIR: /data/profile, MEDIA_DIR: /data/media, DISPLAY: ':99'}
+    volumes: [profile5:/data/profile, browserMedia5:/data/media]
     secrets: [{source: worker_5_token, target: worker_token}]
     networks: [worker5]
 
@@ -167,6 +170,12 @@ volumes:
   profile3: {}
   profile4: {}
   profile5: {}
+  materials: {}
+  browserMedia1: {}
+  browserMedia2: {}
+  browserMedia3: {}
+  browserMedia4: {}
+  browserMedia5: {}
 secrets:
   postgres_password: {file: ./secrets/postgres_password}
   db_password: {file: ./secrets/db_password}

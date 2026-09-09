@@ -39,12 +39,7 @@ public class WorkerClient {
   }
 
   public <T> T command(
-      int worker,
-      String type,
-      String generation,
-      UUID run,
-      Contracts.SubmitPayload payload,
-      Class<T> result) {
+      int worker, String type, String generation, UUID run, Object payload, Class<T> result) {
     return request(
         worker,
         "/internal/commands",

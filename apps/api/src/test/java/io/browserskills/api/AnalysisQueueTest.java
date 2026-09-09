@@ -10,82 +10,112 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class AnalysisQueueTest {
+  static Store.Run run(UUID user, UUID run, String state) {
+    return new Store.Run(
+        run,
+        user,
+        state,
+        1,
+        0,
+        "gen",
+        null,
+        Instant.now(),
+        Instant.now(),
+        Contracts.SelectionSettings.defaults(),
+        null,
+        null,
+        null);
+  }
+
   @Test
-  void oneRunningFourWaitingAndExpiryBeforeItsTurnDoesNotConsumeQuota() throws Exception {
+  void oneRunningFourWaitingAndExpiryBeforeStartingConsumesNoQuota() throws Exception {
     var store = mock(Store.class);
-    var model = mock(InferenceClient.class);
-    var started = new CountDownLatch(1);
-    var release = new CountDownLatch(1);
     when(store.owned(any(), any()))
-        .thenAnswer(
-            c ->
-                new Store.Run(
-                    c.getArgument(1),
-                    c.getArgument(0),
-                    "ANALYZING",
-                    1,
-                    0,
-                    "gen",
-                    null,
-                    Instant.now(),
-                    Instant.now()));
-    when(store.reserveAi(any(), any(), any())).thenReturn(true);
-    when(model.analyze(any(), any()))
-        .thenAnswer(
-            c -> {
-              started.countDown();
-              release.await(5, TimeUnit.SECONDS);
-              return new Contracts.Decision("ANSWER", "a");
-            });
-    var queue = new AnalysisQueue(store, model, Json.mapper(), Clock.systemUTC(), "modelhash");
+        .thenAnswer(c -> run(c.getArgument(0), c.getArgument(1), "ANALYZING"));
+    when(store.reserveAi(any(), any(), any(), any())).thenReturn(true);
+    var queue = new AnalysisQueue(store, Json.mapper(), Clock.systemUTC(), "model");
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
     UUID first = UUID.randomUUID();
-    var complete = new CompletableFuture<Contracts.Decision>();
-    try {
-      queue.submit(first, UUID.randomUUID(), current(null), (p, e) -> complete.complete(p));
-      assertTrue(started.await(1, TimeUnit.SECONDS));
-      var duplicate = new CompletableFuture<Contracts.ApiError>();
-      queue.submit(first, UUID.randomUUID(), current(null), (p, e) -> duplicate.complete(e));
-      assertEquals("AI_BUSY", duplicate.get(1, TimeUnit.SECONDS).code());
-      UUID expiring = UUID.randomUUID();
-      var deadline = new CompletableFuture<Contracts.ApiError>();
-      queue.submit(
-          expiring,
-          UUID.randomUUID(),
-          current(Instant.now().plusMillis(150)),
-          (p, e) -> deadline.complete(e));
-      assertEquals("AI_QUEUE_TIMEOUT", deadline.get(1, TimeUnit.SECONDS).code());
-      verify(store, never()).reserveAi(eq(expiring), any(), any());
+    try (var pool = Executors.newFixedThreadPool(8)) {
+      var running =
+          pool.submit(
+              () ->
+                  queue.call(
+                      first,
+                      UUID.randomUUID(),
+                      "a".repeat(64),
+                      "a".repeat(64),
+                      null,
+                      t -> {
+                        entered.countDown();
+                        try {
+                          release.await(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                        }
+                        return "done";
+                      }));
+      assertTrue(entered.await(1, TimeUnit.SECONDS));
+      assertEquals(
+          "AI_BUSY",
+          assertThrows(
+                  ApiException.class,
+                  () ->
+                      queue.call(
+                          first, UUID.randomUUID(), "a".repeat(64), "a".repeat(64), null, t -> "x"))
+              .code());
+      UUID expired = UUID.randomUUID();
+      assertEquals(
+          "AI_QUEUE_TIMEOUT",
+          assertThrows(
+                  ApiException.class,
+                  () ->
+                      queue.call(
+                          expired,
+                          UUID.randomUUID(),
+                          "a".repeat(64),
+                          "a".repeat(64),
+                          Instant.now().plusMillis(100),
+                          t -> "x"))
+              .code());
+      verify(store, never()).reserveAi(eq(expired), any(), any(), any());
+      var waiting = new ArrayList<Future<String>>();
       for (int i = 0; i < 4; i++)
-        queue.submit(UUID.randomUUID(), UUID.randomUUID(), current(null), (p, e) -> {});
-      var full = new CompletableFuture<Contracts.ApiError>();
-      queue.submit(UUID.randomUUID(), UUID.randomUUID(), current(null), (p, e) -> full.complete(e));
-      assertEquals("AI_BUSY", full.get(1, TimeUnit.SECONDS).code());
+        waiting.add(
+            pool.submit(
+                () ->
+                    queue.call(
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        "a".repeat(64),
+                        "a".repeat(64),
+                        null,
+                        t -> "queued")));
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+      var executor =
+          (ThreadPoolExecutor)
+              org.springframework.test.util.ReflectionTestUtils.getField(queue, "executor");
+      while (executor.getQueue().size() < 4 && System.nanoTime() < deadline) Thread.sleep(5);
+      assertEquals(
+          "AI_BUSY",
+          assertThrows(
+                  ApiException.class,
+                  () ->
+                      queue.call(
+                          UUID.randomUUID(),
+                          UUID.randomUUID(),
+                          "a".repeat(64),
+                          "a".repeat(64),
+                          null,
+                          t -> "x"))
+              .code());
       release.countDown();
-      assertEquals("a", complete.get(2, TimeUnit.SECONDS).optionId());
+      assertEquals("done", running.get(2, TimeUnit.SECONDS));
+      for (var f : waiting) assertEquals("queued", f.get(2, TimeUnit.SECONDS));
     } finally {
       release.countDown();
       queue.close();
     }
-  }
-
-  private Materials.Current current(Instant expires) {
-    var s = SnapshotValidationTest.snapshot("t");
-    return new Materials.Current(
-        UUID.randomUUID(),
-        new Contracts.TaskSnapshot(
-            s.projectId(),
-            s.taskId(),
-            s.question(),
-            s.instruction(),
-            null,
-            null,
-            s.options(),
-            s.snapshotHash(),
-            expires,
-            s.adapterVersion()),
-        "nonce",
-        Map.of(),
-        null,
-        null);
   }
 }

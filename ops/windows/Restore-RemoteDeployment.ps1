@@ -22,6 +22,7 @@ foreach($file in $manifest.files.Keys){
     if((Get-FileHash -LiteralPath (Join-Path $backup $file)).Hash.ToLowerInvariant() -ne $manifest.files[$file]){throw "Backup checksum mismatch: $file"}
 }
 $config=Get-Content -LiteralPath (Join-Path $backup source-compose.json) -Raw|ConvertFrom-Json -AsHashtable
+$ephemeral=@(Get-EphemeralArchiveMounts $config)
 $oldPlan=Get-Content -LiteralPath (Join-Path $backup deployment.json) -Raw|ConvertFrom-Json -AsHashtable
 if($oldPlan.installId -ne $manifest.installId -or $oldPlan.project -ne $manifest.sourceProject){throw 'Backup deployment identity mismatch.'}
 if(@($manifest.volumes|Where-Object kind -EQ profile).Count -ne 5 -or @($manifest.volumes|Where-Object kind -NE profile).Count -ne 8){throw 'Expected five profiles and eight secret/init archives.'}
@@ -75,13 +76,23 @@ $compose=Get-ArchiveCompose $Project @($composeFile)
 Invoke-RemoteDocker ($compose+@('config','--quiet'))|Out-Null
 $helperImage=$manifest.images.postgres
 $created=@()
-$dataKeys=@($manifest.volumes|ForEach-Object{$_.sourceKey})+@(@($config.services.postgres.volumes|Where-Object target -EQ '/var/lib/postgresql/data')[0].source)
+$dataKeys=@($manifest.volumes|ForEach-Object{$_.sourceKey})+@(@($config.services.postgres.volumes|Where-Object target -EQ '/var/lib/postgresql/data')[0].source)+@($ephemeral|ForEach-Object{$_.sourceKey})
 foreach($key in $dataKeys|Select-Object -Unique){
     $name=$config.volumes[$key].name
     Invoke-RemoteDocker @('volume','create','--label',"browserskills.install-id=$installId",'--label','browserskills.managed=remote-restore',$name)|Out-Null
     $created+=$name
 }
 $payloads=@()
+foreach($volume in $ephemeral){
+    $helper=$null
+    try{
+        $name=$config.volumes[$volume.sourceKey].name
+        Assert-ArchiveOwner volume $name $installId
+        $helper=Start-ArchiveHelper $helperImage $name $operation -Writable
+        Invoke-RemoteDocker @('exec',$helper,'chown',"$($volume.uid):$($volume.uid)",'/data')|Out-Null
+        Invoke-RemoteDocker @('exec',$helper,'chmod','0700','/data')|Out-Null
+    }finally{if($helper){Stop-ArchiveHelper $helper $operation}}
+}
 foreach($volume in $manifest.volumes){
     $name=$config.volumes[$volume.sourceKey].name
     $helper=$null
@@ -115,7 +126,7 @@ if($count -ne '0'){throw 'Restore requires an empty application database.'}
 $role=Invoke-RemoteDocker @('exec',$postgres,'sh','-ec','PGPASSWORD=$(cat /run/secrets/db_password); export PGPASSWORD; exec psql -h 127.0.0.1 -U browserskills -d browserskills -Atc "SELECT current_user"')
 if($role -ne 'browserskills'){throw 'Preserved database role/password compatibility check failed.'}
 Copy-ArchiveProcess @('exec','-i',$postgres,'pg_restore','--exit-on-error','--single-transaction','--username=postgres','--dbname=browserskills') (Join-Path $backup database.dump) Send ($manifest.maximumArchiveMiB*1MB)|Out-Null
-Invoke-RemoteDocker ($compose+@('create','--no-build','--no-deps','api','browser-1','browser-2','browser-3','browser-4','browser-5')) '' 180|Out-Null
+Invoke-RemoteDocker ($compose+@('up','--no-start','--no-build','--no-deps','--pull','never','api','browser-1','browser-2','browser-3','browser-4','browser-5')) '' 180|Out-Null
 $newPlan=@{schemaVersion=1;installId=$installId;endpoint=$DockerHost;origin=$config.services.api.environment.BROWSERSKILLS_PUBLIC_ORIGIN;login=$oldPlan.login;project=$Project;payloads=$payloads;postgresImage=$helperImage;composeSha256=(Get-FileHash -LiteralPath $composeFile).Hash.ToLowerInvariant();restoredFrom=$manifest.sourceProject;createdAtUtc=[DateTime]::UtcNow.ToString('o')}
 Write-Utf8 (Join-Path $output deployment.json) ($newPlan|ConvertTo-Json -Depth 12)
 Write-Utf8 (Join-Path $output restore-result.json) (@{completedAtUtc=[DateTime]::UtcNow.ToString('o');project=$Project;installId=$installId;endpoint=$DockerHost;composeFile=$composeFile;createdVolumes=$created;images=$manifest.images;model=$manifest.model;apiAndWorkersStarted=$false;databasePasswordVerified=$true;sourceBackupSha256=(Get-FileHash -LiteralPath (Join-Path $backup backup.json)).Hash.ToLowerInvariant()}|ConvertTo-Json -Depth 10)

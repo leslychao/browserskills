@@ -2,9 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { connect } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
+import { pipeline } from 'node:stream/promises';
 import { WorkerCommandSchema } from '@browserskills/contracts';
 import { BrowserOwner } from './owner.js';
-import { WorkerError, errorBody } from './errors.js';
+import { WorkerError, errorBody,normalizeWorkerError } from './errors.js';
 import { parseRange } from './media.js';
 
 export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900){
@@ -24,10 +25,10 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
       if(activeRequests>=16)throw new WorkerError('WORKER_BUSY',429);
       activeRequests++;
       try{
-        if(request.method==='GET'&&path==='/internal/status'){json(response,200,owner.status());return;}
+        if(request.method==='GET'&&path==='/internal/status'){json(response,200,await owner.refreshedStatus());return;}
         if(request.method==='POST'&&path==='/internal/commands'){
           if(!request.headers['content-type']?.startsWith('application/json'))throw new WorkerError('UNSUPPORTED_CONTENT_TYPE',415);
-          let body='';for await(const chunk of request){body+=String(chunk);if(Buffer.byteLength(body)>16_384)throw new WorkerError('REQUEST_TOO_LARGE',413);}
+          let body='';for await(const chunk of request){body+=String(chunk);if(Buffer.byteLength(body)>2*1024*1024)throw new WorkerError('REQUEST_TOO_LARGE',413);}
           if(closing)throw new WorkerError('WORKER_CLOSING',503);
           let parsed:unknown;try{parsed=JSON.parse(body);}catch{throw new WorkerError('INVALID_COMMAND',400);}
           const command=WorkerCommandSchema.safeParse(parsed);if(!command.success)throw new WorkerError('INVALID_COMMAND',400);
@@ -35,14 +36,14 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
         }
         if(request.method==='GET'&&path.startsWith('/internal/media/')){
           const id=path.slice('/internal/media/'.length);if(!/^[a-f0-9-]{36}$/.test(id))throw new WorkerError('NOT_FOUND',404);
-          const metadata=owner.media.metadata(id);const bytes=await owner.media.read(id);let range;
-          try{range=parseRange(request.headers.range,bytes.length);}catch(error){response.setHeader('Content-Range',`bytes */${bytes.length}`);throw error;}
-          response.writeHead(range?206:200,{'Content-Type':metadata.mimeType,'Content-Length':range?range.end-range.start+1:bytes.length,'Cache-Control':'no-store','Accept-Ranges':'bytes','X-Content-Type-Options':'nosniff',...(range?{'Content-Range':`bytes ${range.start}-${range.end}/${bytes.length}`}:{})});
-          response.end(range?bytes.subarray(range.start,range.end+1):bytes);return;
+          const metadata=owner.media.metadata(id);let range;
+          try{range=parseRange(request.headers.range,metadata.byteLength);}catch(error){response.setHeader('Content-Range',`bytes */${metadata.byteLength}`);throw error;}
+          response.writeHead(range?206:200,{'Content-Type':metadata.mimeType,'Content-Length':range?range.end-range.start+1:metadata.byteLength,'Cache-Control':'no-store','Accept-Ranges':'bytes','X-Content-Type-Options':'nosniff',...(range?{'Content-Range':`bytes ${range.start}-${range.end}/${metadata.byteLength}`}:{})});
+          await pipeline(owner.media.stream(id,range),response);return;
         }
         throw new WorkerError('NOT_FOUND',404);
       }finally{activeRequests--;}
-    }catch(error){if(!response.headersSent)json(response,error instanceof WorkerError?error.status:500,errorBody(error));else response.destroy();}
+    }catch(error){if(!response.headersSent)json(response,normalizeWorkerError(error).status,errorBody(error));else response.destroy();}
   });
   server.requestTimeout=180_000;server.headersTimeout=10_000;server.keepAliveTimeout=5_000;server.maxHeadersCount=30;
   const bridge=new WebSocketServer({noServer:true,maxPayload:64*1024,perMessageDeflate:false});

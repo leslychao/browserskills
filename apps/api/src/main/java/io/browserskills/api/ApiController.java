@@ -148,10 +148,35 @@ public class ApiController {
     return runs.view(user(auth), id);
   }
 
-  @PostMapping("/api/runs/{id}/confirm")
-  Contracts.RunView confirm(
-      Authentication auth, @PathVariable UUID id, @RequestBody Contracts.Confirm request) {
-    return runs.confirm(user(auth), id, request);
+  @PostMapping("/api/runs/{id}/resume")
+  Contracts.RunView resume(Authentication auth, @PathVariable UUID id) {
+    return runs.resume(user(auth), id);
+  }
+
+  @GetMapping("/api/yang/session")
+  Contracts.YangSession yangSession(Authentication auth) {
+    return runs.session(user(auth));
+  }
+
+  @GetMapping("/api/yang/catalogue")
+  Contracts.Catalogue catalogue(Authentication auth) {
+    return runs.catalogue(user(auth), false);
+  }
+
+  @PostMapping("/api/yang/catalogue/refresh")
+  Contracts.Catalogue refreshCatalogue(Authentication auth) {
+    return runs.catalogue(user(auth), true);
+  }
+
+  @GetMapping("/api/yang/selection")
+  Contracts.SelectionSettings selection(Authentication auth) {
+    return store.selection(user(auth));
+  }
+
+  @PutMapping("/api/yang/selection")
+  Contracts.SelectionSettings selection(
+      Authentication auth, @RequestBody Contracts.SelectionSettings settings) {
+    return store.selection(user(auth), settings);
   }
 
   @PostMapping("/api/runs/{id}/stop")

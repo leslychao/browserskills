@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { BrowserContext, Frame } from 'playwright';
@@ -8,7 +9,8 @@ import sharp from 'sharp';
 import { WorkerError } from './errors.js';
 
 const MAX_ASSET = 20 * 1024 * 1024;
-const MAX_TOTAL = 64 * 1024 * 1024;
+// The API reserves a further 64 MiB working cache: the per-user total stays within 1 GiB.
+const MAX_TOTAL = 960 * 1024 * 1024;
 const AUDIO_FORMATS = 'wav,mp3,flac,ogg,matroska,webm,mov,mp4';
 export const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
 
@@ -19,8 +21,16 @@ export class MediaStore {
   private readonly directory: string;
   private entries = new Map<string, StoredAsset>();
   private totalBytes = 0;
+  private reservedBytes = 0;
   private epoch = 0;
   constructor(directory: string, private readonly ffprobe = process.env.FFPROBE_PATH || 'ffprobe') { this.directory = resolve(directory); }
+
+  async initialize():Promise<void>{
+    await mkdir(this.directory,{recursive:true,mode:0o700});
+    // This is a dedicated media volume. Never recurse or touch the persistent Chromium profile.
+    for(const entry of await readdir(this.directory,{withFileTypes:true}))if(entry.isFile()&&/^[a-f0-9-]{36}$/.test(entry.name))await unlink(join(this.directory,entry.name));
+    this.entries.clear();this.totalBytes=0;this.epoch++;
+  }
 
   async put(bytes: Buffer, kind: 'image'|'audio', audioLimitMs = 60_000): Promise<MediaAsset> {
     const epoch=this.epoch;
@@ -31,11 +41,12 @@ export class MediaStore {
       if (kind === 'audio' && existing.metadata.durationMs! > audioLimitMs) throw new WorkerError('AUDIO_TOO_LONG', 422);
       return existing.metadata;
     }
-    if(this.totalBytes+bytes.length>MAX_TOTAL)throw new WorkerError('MEDIA_TOO_LARGE',422);
-    await mkdir(this.directory, {recursive:true, mode:0o700});
+    if(this.totalBytes+this.reservedBytes+bytes.length>MAX_TOTAL)throw new WorkerError('MEDIA_TOO_LARGE',422);
+    this.reservedBytes+=bytes.length;
     const id=randomUUID(); const path=join(this.directory,id);
-    await writeFile(path,bytes,{flag:'wx',mode:0o600});
     try {
+      await mkdir(this.directory, {recursive:true, mode:0o700});
+      await writeFile(path,bytes,{flag:'wx',mode:0o600});
       let mimeType:string; let durationMs:number|undefined;
       if(kind==='image') {
         const metadata=await sharp(bytes,{limitInputPixels:40_000_000,animated:true}).metadata();
@@ -66,7 +77,7 @@ export class MediaStore {
     } catch(error) {
       await unlink(path).catch(()=>undefined);
       throw error instanceof WorkerError ? error : new WorkerError(kind==='audio'?'UNSUPPORTED_AUDIO':'UNSUPPORTED_IMAGE',422);
-    }
+    }finally{this.reservedBytes-=bytes.length;}
   }
 
   private decodedDuration(path:string,limitMs:number):Promise<number>{
@@ -95,6 +106,7 @@ export class MediaStore {
 
   metadata(id:string):MediaAsset {const entry=this.entries.get(id);if(!entry)throw new WorkerError('NOT_FOUND',404);return entry.metadata;}
   async read(id:string):Promise<Buffer> {const entry=this.entries.get(id);if(!entry)throw new WorkerError('NOT_FOUND',404);return readFile(entry.path);}
+  stream(id:string,range:ByteRange|null=null){const entry=this.entries.get(id);if(!entry)throw new WorkerError('NOT_FOUND',404);return createReadStream(entry.path,{highWaterMark:64*1024,...(range?{start:range.start,end:range.end}:{})});}
   async retain(ids:Set<string>):Promise<void> {
     for(const [id,entry] of this.entries) if(!ids.has(id)){this.entries.delete(id);this.totalBytes-=entry.metadata.byteLength;await unlink(entry.path).catch(()=>undefined);}
   }

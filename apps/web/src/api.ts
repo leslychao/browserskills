@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { ApiErrorSchema, BrowserStatusSchema, MeSchema, RunSummarySchema, RunViewSchema } from '@browserskills/contracts';
+import { ApiErrorSchema,BrowserStatusSchema,CatalogueSchema,MeSchema,RunSummarySchema,RunViewSchema,SelectionSettingsSchema,YangSessionSchema } from '@browserskills/contracts';
+import type { SelectionSettings } from '@browserskills/contracts';
 import { newRequestId } from './request-id';
 
 export class ClientError extends Error {
   constructor(public readonly status:number,public readonly code:string,message:string){super(message);this.name='ClientError';}
 }
-export type Confirmation = {requestId:string;taskId:string;snapshotHash:string;instructionHash:string;optionId:string;confirmationNonce:string};
 export class ApiClient {
   constructor(private readonly fetcher: typeof fetch = (...args)=>fetch(...args)) {}
   private async request<T>(path:string,schema:z.ZodType<T>,init:RequestInit={}):Promise<T> {
@@ -33,10 +33,15 @@ export class ApiClient {
   openBrowser(){return this.change('/api/browser',BrowserStatusSchema);}
   enterManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema);}
   exitManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema,undefined,'DELETE');}
+  yangSession(){return this.request('/api/yang/session',YangSessionSchema);}
+  catalogue(){return this.request('/api/yang/catalogue',CatalogueSchema);}
+  refreshCatalogue(){return this.change('/api/yang/catalogue/refresh',CatalogueSchema);}
+  selection(){return this.request('/api/yang/selection',SelectionSettingsSchema);}
+  saveSelection(selection:SelectionSettings){return this.change('/api/yang/selection',SelectionSettingsSchema,selection,'PUT');}
   runs(){return this.request('/api/runs',z.array(RunSummarySchema));}
   run(id:string){return this.request(`/api/runs/${encodeURIComponent(id)}`,RunViewSchema);}
-  startRun(maxTasks:number,requestId=newRequestId()){return this.change('/api/runs',RunViewSchema,{maxTasks,requestId});}
-  confirm(id:string,body:Confirmation){return this.change(`/api/runs/${encodeURIComponent(id)}/confirm`,RunViewSchema,body);}
+  startRun(maxTasks:number,selection:SelectionSettings,requestId=newRequestId()){return this.change('/api/runs',RunViewSchema,{maxTasks,selection,requestId});}
+  resume(id:string){return this.change(`/api/runs/${encodeURIComponent(id)}/resume`,RunViewSchema);}
   stop(id:string){return this.change(`/api/runs/${encodeURIComponent(id)}/stop`,RunViewSchema);}
 }
 export const mediaUrl=(runId:string,assetId:string)=>`/api/runs/${encodeURIComponent(runId)}/media/${encodeURIComponent(assetId)}`;

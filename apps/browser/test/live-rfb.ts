@@ -10,7 +10,6 @@ import { connect } from 'node:net';
 import { WebSocket } from 'ws';
 import { BrowserOwner } from '../src/owner.js';
 import { createWorkerServer } from '../src/server.js';
-import { fixtureProfile } from './fixture-profile.js';
 import { startTestSite } from '../../../tests/test-site/server.js';
 
 const delay=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -18,7 +17,7 @@ const directory=await mkdtemp(join(tmpdir(),'browserskills-rfb-'));
 const fixture=await startTestSite();
 const display=':98';const rfbPort=5901;process.env.DISPLAY=display;
 const xvfb=spawn('Xvfb',[display,'-screen','0','1366x768x24','-nolisten','tcp'],{stdio:'ignore'});
-const owner=new BrowserOwner({workerId:'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media'),headless:false,startUrl:fixture.url,profiles:[fixtureProfile(fixture.url)]});
+const owner=new BrowserOwner({workerId:'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media'),headless:false,startUrl:fixture.url});
 const token='live-rfb-fixture-token-at-least-thirty-two-characters';
 const app=createWorkerServer(owner,token,rfbPort);
 let vnc:ReturnType<typeof spawn>|null=null;

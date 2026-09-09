@@ -1,73 +1,57 @@
 package io.browserskills.api;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
-import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
 public class InferenceClient {
   private static final String SYSTEM = systemPrompt();
-  private static final SecureRandom RANDOM = new SecureRandom();
-  private final JsonMapper json;
-  private final AudioNormalizer audio;
-  private final URI base;
-  private final BoundedHttp http = new BoundedHttp();
 
   private static String systemPrompt() {
     try {
-      return new ClassPathResource("decision-system.txt")
-          .getContentAsString(StandardCharsets.UTF_8)
+      return new org.springframework.core.io.ClassPathResource("decision-system.txt")
+          .getContentAsString(java.nio.charset.StandardCharsets.UTF_8)
           .strip();
-    } catch (IOException e) {
-      throw new IllegalStateException("The canonical decision system prompt is missing.", e);
+    } catch (java.io.IOException e) {
+      throw new IllegalStateException("Canonical model prompt is missing", e);
     }
   }
+
+  private final JsonMapper json;
+  private final AudioNormalizer audio;
+  private final Materials materials;
+  private final URI base;
+  private final BoundedHttp http = new BoundedHttp();
 
   public InferenceClient(
       JsonMapper json,
       AudioNormalizer audio,
+      Materials materials,
       @Value("${api.inference-url:http://inference:8080}") String url) {
     this.json = json;
     this.audio = audio;
+    this.materials = materials;
     this.base = URI.create(url);
   }
 
-  private List<Object> content(
-      Materials.Current current, List<Contracts.Option> options, long deadline) {
-    var snapshot = current.snapshot();
-    var result = new ArrayList<Object>();
-    result.add(text("PROJECT INSTRUCTIONS (all blocks, in order):"));
-    for (var block : snapshot.instruction().blocks()) {
-      if ("text".equals(block.type())) result.add(text(block.text()));
-      else {
-        if (block.caption() != null) result.add(text(block.caption()));
-        result.add(media(block.asset(), current, deadline));
-      }
-    }
-    result.add(text("CURRENT WHOLE TASK:\n" + snapshot.question()));
-    if (snapshot.image() != null) result.add(media(snapshot.image(), current, deadline));
-    if (snapshot.audio() != null) result.add(media(snapshot.audio(), current, deadline));
-    result.add(text("AVAILABLE OPTIONS:\n" + json.writeValueAsString(options)));
-    return result;
+  private Map<String, Object> text(String value) {
+    return Map.of("type", "text", "text", value);
   }
 
-  private Map<String, Object> text(String text) {
-    return Map.of("type", "text", "text", text);
+  private Duration remaining(long deadline) {
+    long n = deadline - System.nanoTime();
+    if (n <= 0) throw new ApiException(503, "MODEL_TIMEOUT", "Inference deadline exceeded.");
+    return Duration.ofNanos(n);
   }
 
-  private Map<String, Object> media(
-      Contracts.MediaAsset asset, Materials.Current current, long deadline) {
-    byte[] bytes = current.media().get(asset.id());
-    if (bytes == null)
-      throw new ApiException(502, "MEDIA_UNAVAILABLE", "Complete task media is required.");
+  private Object media(UUID run, Contracts.MediaAsset asset, long deadline) {
+    byte[] bytes = materials.asset(run, asset.id()).bytes();
     if (asset.kind().equals("image"))
       return Map.of(
           "type",
@@ -88,58 +72,36 @@ public class InferenceClient {
             "wav"));
   }
 
-  public Contracts.Decision analyze(Materials.Current current, Duration timeout) {
-    long deadline = System.nanoTime() + timeout.toNanos();
-    // Numeric-looking site IDs can be mistaken for answer values. Keep the model's
-    // identifiers opaque and local to this request; the public snapshot is unchanged.
-    var originals = current.snapshot().options().stream().map(Contracts.Option::id).toList();
-    var actualIds = new LinkedHashMap<String, String>();
-    var options = new ArrayList<Contracts.Option>();
-    for (var option : current.snapshot().options()) {
-      String alias;
-      do {
-        var letters = new char[10];
-        for (int i = 0; i < letters.length; i++) letters[i] = (char) ('a' + RANDOM.nextInt(26));
-        alias = new String(letters);
-      } while (actualIds.containsKey(alias) || originals.contains(alias));
-      actualIds.put(alias, option.id());
-      options.add(new Contracts.Option(alias, option.label()));
-    }
-    var optionIds = List.copyOf(actualIds.keySet());
-    var schema =
-        Map.of(
-            "oneOf",
-            List.of(
-                Map.of(
-                    "type",
-                    "object",
-                    "properties",
-                    Map.of(
-                        "decision",
-                        Map.of("const", "ANSWER"),
-                        "optionId",
-                        Map.of("type", "string", "enum", optionIds)),
-                    "required",
-                    List.of("decision", "optionId"),
-                    "additionalProperties",
-                    false),
-                Map.of(
-                    "type",
-                    "object",
-                    "properties",
-                    Map.of("decision", Map.of("const", "ABSTAIN")),
-                    "required",
-                    List.of("decision"),
-                    "additionalProperties",
-                    false)));
+  private static Map<String, Object> object(Map<String, Object> properties, List<String> required) {
+    return Map.of(
+        "type",
+        "object",
+        "properties",
+        properties,
+        "required",
+        required,
+        "additionalProperties",
+        false);
+  }
+
+  private static Map<String, Object> string() {
+    return Map.of("type", "string");
+  }
+
+  private static Map<String, Object> array(Object items) {
+    return Map.of("type", "array", "items", items);
+  }
+
+  private <T> T ask(
+      String purpose, List<Object> content, Object schema, Class<T> type, long deadline) {
     var body =
         Map.of(
             "model",
             "Qwen2.5-Omni-7B",
             "messages",
             List.of(
-                Map.of("role", "system", "content", SYSTEM),
-                Map.of("role", "user", "content", content(current, options, deadline))),
+                Map.of("role", "system", "content", SYSTEM + "\n" + purpose),
+                Map.of("role", "user", "content", content)),
             "temperature",
             0,
             "stream",
@@ -147,15 +109,13 @@ public class InferenceClient {
             "cache_prompt",
             false,
             "max_tokens",
-            512,
+            2048,
             "response_format",
             Map.of(
                 "type",
                 "json_schema",
                 "json_schema",
-                Map.of("name", "Decision", "strict", true, "schema", schema)));
-    // The server is deployed with --no-context-shift. No clipping, transcript substitution,
-    // retries or context shrinking is permitted when multimodal embeddings exceed context.
+                Map.of("name", "YangResponse", "strict", true, "schema", schema)));
     var response =
         http.send(
             HttpRequest.newBuilder(base.resolve("/v1/chat/completions"))
@@ -163,43 +123,266 @@ public class InferenceClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(body)))
                 .build(),
-            64 * 1024,
+            128 * 1024,
             remaining(deadline));
-    if (response.statusCode() == 413)
+    if (response.statusCode() == 413 || response.statusCode() == 400)
       throw new ApiException(
           422,
           "MODEL_CONTEXT_UNSUPPORTED",
-          "Complete instructions and media do not fit the model context. Select manually.");
-    if (response.statusCode() == 400)
-      throw new ApiException(
-          422,
-          "MODEL_REQUEST_UNSUPPORTED",
-          "Model rejected the complete task format or context. Select manually.");
+          "The complete selected material does not fit or is unsupported by the model.");
     if (response.statusCode() / 100 != 2)
-      throw new ApiException(503, "MODEL_UNAVAILABLE", "Model is unavailable. Select manually.");
+      throw new ApiException(503, "MODEL_UNAVAILABLE", "Local model is unavailable.");
     try {
-      var node = json.readTree(response.body());
-      var choice = node.path("choices").get(0);
+      var choice = json.readTree(response.body()).path("choices").get(0);
       if (choice == null || !choice.path("finish_reason").asString().equals("stop"))
         throw new IllegalArgumentException();
-      var decision =
-          SnapshotValidation.decision(
-              choice.path("message").path("content").asString(), options, json);
-      return decision.decision().equals("ABSTAIN")
-          ? decision
-          : new Contracts.Decision("ANSWER", actualIds.get(decision.optionId()));
-    } catch (ApiException e) {
-      throw e;
+      String value = choice.path("message").path("content").asString();
+      return json.readValue(value, type);
     } catch (Exception e) {
       throw new ApiException(
-          502, "INVALID_MODEL_RESPONSE", "Model returned an unsupported answer. Select manually.");
+          502, "INVALID_MODEL_RESPONSE", "Model did not return a complete structured response.");
     }
   }
 
-  private Duration remaining(long deadline) {
-    long nanos = deadline - System.nanoTime();
-    if (nanos <= 0)
-      throw new ApiException(503, "MODEL_TIMEOUT", "Analysis deadline exceeded. Select manually.");
-    return Duration.ofNanos(nanos);
+  public InstructionCompiler.Interpretation interpret(
+      UUID run, Contracts.InstructionBlock source, String associatedContext, Duration timeout) {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    var content = new ArrayList<Object>();
+    content.add(text("ASSOCIATED ORIGINAL CONTEXT:\n" + associatedContext));
+    content.add(
+        text(
+            "SOURCE_ID="
+                + source.id()
+                + "\n"
+                + ("text".equals(source.type())
+                    ? source.text()
+                    : Objects.toString(source.caption(), "Instruction example"))));
+    if (source.asset() != null) content.add(media(run, source.asset(), deadline));
+    return ask(
+        "Interpret EVERY rule, exception and example in this one source section. Keep their"
+            + " meaning, ordered dependencies and conditions in rules. complete=false if ambiguous"
+            + " or unreadable. contentOnlySpeech=true ONLY if the section positively establishes"
+            + " that all audio evaluation is about linguistic content and never"
+            + " voice/similarity/prosody/quality; otherwise false.",
+        content,
+        object(
+            Map.of(
+                "sourceId",
+                Map.of("const", source.id()),
+                "rules",
+                string(),
+                "complete",
+                Map.of("type", "boolean"),
+                "contentOnlySpeech",
+                Map.of("type", "boolean")),
+            List.of("sourceId", "rules", "complete", "contentOnlySpeech")),
+        InstructionCompiler.Interpretation.class,
+        deadline);
+  }
+
+  public record SourceSelection(List<String> sourceIds) {}
+
+  public SourceSelection sources(
+      Contracts.TaskPart part,
+      List<Contracts.TaskField> fields,
+      InstructionCompiler.Compiled instruction,
+      Duration timeout) {
+    var content =
+        List.<Object>of(
+            text(
+                "RULES INDEX="
+                    + json.writeValueAsString(
+                        instruction.sections().stream()
+                            .map(s -> Map.of("id", s.id(), "rules", s.rules()))
+                            .toList())),
+            text("PART=" + part.text() + "\nFIELDS=" + json.writeValueAsString(fields)));
+    var schema =
+        object(
+            Map.of(
+                "sourceIds",
+                array(
+                    Map.of(
+                        "type",
+                        "string",
+                        "enum",
+                        instruction.sections().stream()
+                            .map(InstructionCompiler.Section::id)
+                            .toList()))),
+            List.of("sourceIds"));
+    var result =
+        ask(
+            "Select all original instruction sections and examples needed to answer these fields,"
+                + " including general rules and exceptions. Do not omit any relevant source.",
+            content,
+            schema,
+            SourceSelection.class,
+            System.nanoTime() + timeout.toNanos());
+    if (result == null
+        || result.sourceIds() == null
+        || result.sourceIds().isEmpty()
+        || new HashSet<>(result.sourceIds()).size() != result.sourceIds().size()
+        || !instruction.sections().stream()
+            .map(InstructionCompiler.Section::id)
+            .toList()
+            .containsAll(result.sourceIds()))
+      throw new ApiException(
+          422,
+          "INSTRUCTION_INCOMPLETE",
+          "Required original instruction sections were not selected.");
+    return result;
+  }
+
+  public Contracts.AnswerSet answer(
+      UUID run,
+      Contracts.TaskPart part,
+      List<Contracts.TaskField> fields,
+      InstructionCompiler.Compiled instruction,
+      List<String> sources,
+      Duration timeout) {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    var content = new ArrayList<Object>();
+    var assets = new LinkedHashMap<String, Contracts.MediaAsset>();
+    for (var section : instruction.sections())
+      if (sources.contains(section.id()) && section.source().asset() != null)
+        SnapshotValidation.add(assets, section.source().asset());
+    for (var asset : part.media()) SnapshotValidation.add(assets, asset);
+    checkBatch(assets.values());
+    var emitted = new HashSet<String>();
+    content.add(
+        text(
+            "ALL COMPILED RULES="
+                + json.writeValueAsString(
+                    instruction.sections().stream()
+                        .map(s -> Map.of("id", s.id(), "rules", s.rules()))
+                        .toList())));
+    for (var section : instruction.sections())
+      if (sources.contains(section.id())) {
+        var source = section.source();
+        content.add(
+            text(
+                "ORIGINAL SOURCE "
+                    + source.id()
+                    + "\n"
+                    + Objects.toString(source.text(), Objects.toString(source.caption(), ""))));
+        if (source.asset() != null) {
+          content.add(text("SOURCE MEDIA " + source.asset().id()));
+          if (emitted.add(source.asset().id())) content.add(media(run, source.asset(), deadline));
+        }
+      }
+    content.add(text("CURRENT PART " + part.id() + "\n" + part.title() + "\n" + part.text()));
+    for (var asset : part.media()) {
+      content.add(text("TASK MEDIA " + asset.id()));
+      if (emitted.add(asset.id())) content.add(media(run, asset, deadline));
+    }
+    content.add(
+        text(
+            "EXISTING VALUES (preserve earlier stages): "
+                + json.writeValueAsString(
+                    part.fields().stream()
+                        .filter(f -> !SnapshotValidation.empty(f.value()))
+                        .toList())));
+    content.add(text("ANSWER EXACTLY THESE FIELDS: " + json.writeValueAsString(fields)));
+    var value = Map.of("anyOf", List.of(string(), array(string()), Map.of("type", "number")));
+    var fieldSchema =
+        object(
+            Map.of(
+                "partId",
+                Map.of("const", part.id()),
+                "fieldId",
+                Map.of(
+                    "type",
+                    "string",
+                    "enum",
+                    fields.stream().map(Contracts.TaskField::id).toList()),
+                "value",
+                value),
+            List.of("partId", "fieldId", "value"));
+    var schema =
+        object(
+            Map.of(
+                "decision",
+                Map.of("enum", List.of("ANSWER", "ABSTAIN")),
+                "answers",
+                array(fieldSchema),
+                "reason",
+                Map.of("type", List.of("string", "null"))),
+            List.of("decision", "answers", "reason"));
+    return ask(
+        "Answer only the requested next-stage fields according to all compiled rules and original"
+            + " selected sources. Include every requested field exactly once; never change earlier"
+            + " stages. If any material or instruction is unclear, return ABSTAIN with no answers"
+            + " and explain why.",
+        content,
+        schema,
+        Contracts.AnswerSet.class,
+        deadline);
+  }
+
+  public Contracts.Mapping map(Contracts.TaskSet task, Duration timeout) {
+    var group =
+        object(
+            Map.of(
+                "partId",
+                string(),
+                "fieldId",
+                string(),
+                "label",
+                string(),
+                "kind",
+                Map.of("enum", List.of("SINGLE_CHOICE", "MULTI_CHOICE")),
+                "controlIds",
+                array(string())),
+            List.of("partId", "fieldId", "label", "kind", "controlIds"));
+    var schema =
+        object(
+            Map.of(
+                "suiteId",
+                Map.of("const", task.suiteId()),
+                "snapshotHash",
+                Map.of("const", task.snapshotHash()),
+                "groups",
+                array(group)),
+            List.of("suiteId", "snapshotHash", "groups"));
+    var result =
+        ask(
+            "Group every observed unmapped control into one unambiguous question. Use each control"
+                + " exactly once and only provided IDs. Do not combine controls from different"
+                + " parts. Generate a distinct fieldId. No selectors or actions.",
+            List.of(
+                text(
+                    json.writeValueAsString(
+                        Map.of(
+                            "parts",
+                            task.parts().stream()
+                                .map(
+                                    p ->
+                                        Map.of(
+                                            "id",
+                                            p.id(),
+                                            "text",
+                                            p.text(),
+                                            "unmappedControls",
+                                            p.unmappedControls(),
+                                            "existingFields",
+                                            p.fields()))
+                                .toList())))),
+            schema,
+            Contracts.Mapping.class,
+            System.nanoTime() + timeout.toNanos());
+    SnapshotValidation.mapping(task, result);
+    return result;
+  }
+
+  static void checkBatch(Collection<Contracts.MediaAsset> assets) {
+    if (assets.stream().mapToLong(Contracts.MediaAsset::byteLength).sum() > Materials.REQUEST_LIMIT
+        || assets.stream()
+                .filter(a -> a.kind().equals("audio"))
+                .mapToLong(a -> a.durationMs())
+                .sum()
+            > 120000)
+      throw new ApiException(
+          422,
+          "MODEL_MATERIAL_LIMIT",
+          "The complete selected media exceeds one inference request limit.");
   }
 }

@@ -37,6 +37,20 @@ function Get-ArchiveCompose([string]$Project,[string[]]$Files){
     foreach($file in $Files){$arguments+=@('-f',[IO.Path]::GetFullPath($file))}
     return $arguments
 }
+function Get-EphemeralArchiveMounts([System.Collections.IDictionary]$Config){
+    $seen=[Collections.Generic.HashSet[string]]::new()
+    foreach($service in $Config.services.Keys){
+        foreach($mount in @($Config.services[$service].volumes)){
+            if($mount.target -notin @('/data/materials','/data/media')){continue}
+            $expected=if($service -eq 'api'){'/data/materials'}elseif($service -match '^browser-[1-5]$'){'/data/media'}else{throw 'Unexpected service with ephemeral application storage.'}
+            if($mount.type -ne 'volume' -or $mount.target -ne $expected -or -not $Config.volumes.Contains($mount.source) -or -not $seen.Add($mount.source)){throw 'Invalid or shared ephemeral volume.'}
+            $references=@($Config.services.Values|ForEach-Object{$_.volumes}|Where-Object source -EQ $mount.source)
+            if($references.Count -ne 1){throw 'Ephemeral volume is shared with another mount.'}
+            $uid=if($service -eq 'api'){10001}else{1001}
+            [pscustomobject]@{service=$service;sourceKey=$mount.source;name=$Config.volumes[$mount.source].name;target=$mount.target;uid=$uid}
+        }
+    }
+}
 function Assert-ArchiveOwner([string]$Kind,[string]$Name,[string]$InstallId){
     $format=if($Kind -eq 'container'){'{{index .Config.Labels "browserskills.install-id"}}'}else{'{{index .Labels "browserskills.install-id"}}'}
     $args=if($Kind -eq 'container'){@('inspect',$Name,'--format',$format)}else{@($Kind,'inspect',$Name,'--format',$format)}

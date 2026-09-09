@@ -23,59 +23,109 @@ public final class Contracts {
       String id, String kind, String mimeType, long byteLength, String sha256, Long durationMs) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  public record InstructionBlock(String type, String text, MediaAsset asset, String caption) {}
+  public record InstructionBlock(
+      String id, String type, String text, MediaAsset asset, String caption) {}
 
   public record InstructionBundle(String sourceKey, String hash, List<InstructionBlock> blocks) {}
 
-  public record TaskSnapshot(
-      String projectId,
-      String taskId,
-      String question,
-      InstructionBundle instruction,
-      MediaAsset image,
-      MediaAsset audio,
+  public record TaskField(
+      String id,
+      String label,
+      String kind,
+      boolean required,
       List<Option> options,
+      Object value,
+      int stage,
+      Integer maxLength,
+      Double min,
+      Double max) {}
+
+  public record UnmappedControl(String id, String label, String context, Boolean selected) {}
+
+  public record TaskPart(
+      String id,
+      String title,
+      String text,
+      List<MediaAsset> media,
+      List<TaskField> fields,
+      List<UnmappedControl> unmappedControls) {}
+
+  public record TaskSet(
+      String poolId,
+      String suiteId,
+      List<TaskPart> parts,
+      InstructionBundle instruction,
       String snapshotHash,
       Instant expiresAt,
       String adapterVersion) {}
 
-  @JsonInclude(JsonInclude.Include.NON_NULL)
-  public record Decision(String decision, String optionId) {}
+  public record FieldAnswer(String partId, String fieldId, Object value) {}
 
-  public record ReviewTask(
-      String projectId,
-      String taskId,
-      String question,
-      InstructionBundle instruction,
-      MediaAsset image,
-      MediaAsset audio,
-      List<Option> options,
-      String snapshotHash,
-      Instant expiresAt,
-      String adapterVersion,
-      Decision proposal,
-      ApiError aiError,
-      String confirmationNonce) {
-    public static ReviewTask of(TaskSnapshot s, Decision p, ApiError e, String nonce) {
-      return new ReviewTask(
-          s.projectId(),
-          s.taskId(),
-          s.question(),
-          s.instruction(),
-          s.image(),
-          s.audio(),
-          s.options(),
-          s.snapshotHash(),
-          s.expiresAt(),
-          s.adapterVersion(),
-          p,
-          e,
-          nonce);
+  public record AnswerSet(String decision, List<FieldAnswer> answers, String reason) {}
+
+  public record FieldGroup(
+      String partId, String fieldId, String label, String kind, List<String> controlIds) {}
+
+  public record Mapping(String suiteId, String snapshotHash, List<FieldGroup> groups) {}
+
+  public record YangSession(
+      String state, Instant checkedAt, String message, String poolId, String suiteId) {}
+
+  public record BrowserStatus(
+      String workerId,
+      String generation,
+      String mode,
+      String url,
+      String runId,
+      YangSession yang) {}
+
+  public record Reward(String amount, String unit) {}
+
+  public record CatalogueItem(
+      String poolId,
+      String title,
+      Reward reward,
+      String availability,
+      String kind,
+      List<String> modalities,
+      String preparation,
+      ApiError reason) {}
+
+  public record Catalogue(
+      List<CatalogueItem> items, Instant refreshedAt, String activePoolId, String activeSuiteId) {}
+
+  public record SelectionSettings(
+      String mode,
+      String poolId,
+      List<String> includePoolIds,
+      List<String> excludePoolIds,
+      String minReward,
+      List<String> modalities,
+      boolean includeTraining,
+      boolean includeExams) {
+    public static SelectionSettings defaults() {
+      return new SelectionSettings(
+          "MANUAL",
+          null,
+          List.of(),
+          List.of(),
+          null,
+          List.of("text", "image", "audio"),
+          false,
+          false);
     }
   }
 
+  public record InstructionProgress(int processed, int total, int aiRequests) {}
+
   public record RunItemResult(
-      String taskId, int ordinal, String status, String optionId, String code, Instant createdAt) {}
+      String poolId,
+      String suiteId,
+      int ordinal,
+      String status,
+      List<FieldAnswer> answers,
+      String code,
+      Instant createdAt) {}
 
   public record RunSummary(
       UUID id,
@@ -84,7 +134,11 @@ public final class Contracts {
       int processed,
       Instant createdAt,
       Instant updatedAt,
-      ApiError error) {}
+      ApiError error,
+      SelectionSettings selection,
+      CatalogueItem selectedProject,
+      String selectionReason,
+      InstructionProgress instructionProgress) {}
 
   public record RunView(
       UUID id,
@@ -94,30 +148,27 @@ public final class Contracts {
       Instant createdAt,
       Instant updatedAt,
       ApiError error,
-      ReviewTask current,
+      SelectionSettings selection,
+      CatalogueItem selectedProject,
+      String selectionReason,
+      InstructionProgress instructionProgress,
+      TaskSet current,
       List<RunItemResult> results) {}
-
-  public record BrowserStatus(
-      String workerId, String generation, String mode, String url, String runId) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record WorkerCommand(
-      UUID id, String type, String generation, String runId, SubmitPayload payload) {}
+      UUID id, String type, String generation, String runId, Object payload) {}
 
   public record SubmitPayload(
-      String taskId, String snapshotHash, String instructionHash, String optionId) {}
-
-  public record SubmitResult(String outcome, String nextTaskId, String code) {}
-
-  public record StartRun(UUID requestId, int maxTasks) {}
-
-  public record Confirm(
-      UUID requestId,
-      String taskId,
+      String poolId,
+      String suiteId,
       String snapshotHash,
       String instructionHash,
-      String optionId,
-      String confirmationNonce) {}
+      List<FieldAnswer> answers) {}
+
+  public record SubmitResult(String outcome, String nextSuiteId, String code) {}
+
+  public record StartRun(UUID requestId, int maxTasks, SelectionSettings selection) {}
 
   public record ApiError(String code, String message) {}
 }

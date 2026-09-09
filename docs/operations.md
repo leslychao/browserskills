@@ -92,17 +92,31 @@ pwsh -NoProfile -File ops/windows/New-DiagnosticCorpus.ps1 -Destination artifact
 pwsh -NoProfile -File ops/windows/Invoke-ModelEvaluation.ps1 -CorpusDirectory artifacts/evaluation -OutputPath artifacts/evaluation-result.json
 ```
 
-The corpus must contain at least 25 cases each for `text`, `image`, `speech`, and `sound-prosody`; include provenance, label method, fixed option IDs, independently assigned expected answers and media SHA256. `--validate-only` checks corpus shape/hashes without running the model. Each case has `id`, `category`, `instruction`, `question`, `options:[{id,label}]`, `expectedOptionId`, and optional `media:[{path,kind,mimeType,sha256,durationMs}]`. Media paths remain inside the corpus directory. Input audio uses the same standard `input_audio` contract documented in the pinned [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/5266f24da75dc449bd56cbed7addb9c8e4a6a73e/tools/server/README.md).
+The version2 diagnostic corpus contains `schemaVersion:2`, provenance/labelMethod and cases with `id`, category, instruction, ordered `parts:[{id,text,fields,media}]` and scoped `expected:[{partId,fieldId,value}]`. Fields use the production TaskField kinds. No `expectedOptionId` or one-choice response is accepted. Media paths stay inside the corpus directory; SHA256 and byte/audio budgets are validated. `--validate-only` does not call the model. The generator preserves100 original diagnostic questions and adds20 composed sets (30 per category); these synthetic labels do not establish production quality.
 
-The Windows evaluation wrapper accepts at most 128 MiB and 2000 entries, rejects reparse points, streams the corpus into a unique tmpfs directory and removes that temporary copy after saving the measured report. It retains read-only container protection; ordinary `docker cp` into a read-only container is unsuitable even when targeting tmpfs. The serving process samples GPU and container memory during evaluation. Existing result files are never overwritten.
+The Windows wrapper accepts at most128MiB/2000 corpus entries, rejects reparse points, streams into a unique temporary directory, removes the copy after evaluation and never overwrites reports or original audio. FFmpeg retains bounded mono16kPCM16WAV normalization. Context8192, request120s, selectedaudio120s and64MiB request material limits remain. `evaluate.py` reports whole-set exact accuracy, refusals as unsolved, measured latency/resources and `source=direct-model-diagnostic`, `productionPipeline=false`, `admissionEvidence=false`. It uses the canonical AnswerSet prompt with2048 output tokens. Its result cannot enable production categories.
 
-Audio is decoded by FFmpeg with the API's protocol/format allowlists, 20-second normalization limit, mono 16 kHz PCM16 WAV output, 4 MB output bound and ±200 ms duration check. Corpus originals remain untouched. The measured case duration includes normalization and request construction, then the actual inference request. The model request uses the same 512-token ceiling, JSON schema and canonical prompt as the API. `--validate-only` checks corpus structure and original hashes; it does not claim decoder or model readiness.
+Production admission requires independently labelled whole sets executed through actual extraction, instruction preparation and answer stages, minimum25 per capability and90% wholly correct (allfields). Record predictions separately, then score them:
 
-Warmups are excluded; abstentions/errors are unsolved. Acceptance is at least 90% per category and p95 at most 30 seconds for text/image or 90 seconds for audio tasks. The harness reports only measured results and fails with nonzero exit when gates fail. Attach GPU telemetry (`nvidia-smi` while evaluating), host preflight, model provenance and source corpus hash to the result. Synthetic fixture performance alone does not prove Yandex accuracy, environmental-sound understanding, natural speech/prosody or the acceptance of the actual project template.
+```powershell
+python ops/inference/score_sets.py --corpus artifacts/labelled-sets.json --predictions artifacts/pipeline-predictions.json --output artifacts/whole-set-report.json --evidence-output artifacts/quality-evidence.json
+```
 
-If inference is unavailable, `Start-Deployment.ps1 -WithoutInference` starts the app for manual review with an explicit AI error. This is not successful model installation or acceptance.
+The scorer input prediction manifest must contain the actual model SHA256, exact corpus SHA256, `source=production-pipeline-evaluation`, and case results. A provenance label is not proof of how an experiment ran: preserve the real run evidence and independent labels. The script counts missing/abstained cases in the denominator and writes no existing file. Scoring fixtures or direct diagnostics are not admission evidence.
+
+Install an actually passing evidence file read-only at `API_QUALITY_EVIDENCE_PATH` and set matching `API_MODEL_SHA256`, then restart API. The delivered `ops/inference/quality-evidence.json` admits no categories. No cloud fallback is used. Model unavailable or category blocked still permits manual server-browser control; automatic answering remains blocked.
 
 `Test-Deployment.ps1` checks HTTP liveness, then probes the loopback-only `/health/ready` endpoint from inside the API container. It reports database, all five browsers and inference separately. `-WithoutInference` permits the model to be down; it does not ignore a failed database or browser worker.
+
+## Updating the existing remote Yang deployment
+
+After successful source/system checks and image builds, use the standalone currently active Compose descriptor (do not combine an old TLS descriptor):
+
+```powershell
+pwsh -NoProfile -File ops/windows/Update-RemoteYang.ps1 -Directory runtime/remote-107/INSTALL_ID -ComposeFile runtime/remote-107/INSTALL_ID/compose.lan-http.json -ApiImage browserskills-api:yang-RELEASE -BrowserImage browserskills-browser:yang-RELEASE -InferenceImage browserskills-inference:yang-RELEASE
+```
+
+The updater freezes image IDs, transfers missing images, prepares a new descriptor, runs the real remote backup before mutation and adds six isolated temporary material volumes. It updates API, five workers and the inference wrapper/diagnostics. PostgreSQL, model weight mounts, secrets, profile mounts and HTTP origin are verified unchanged; the llama.cpp revision and Qwen hashes remain pinned. It outputs the active descriptor and keeps the previous backup/config. Subsequent backups/updates must use that new descriptor. V2 changes the database schema: rollback to the old API requires restoring the corresponding backup into fresh volumes, not merely switching the image. Temporary originals/cache are excluded from backup; restored volumes are empty and owned by the runtime UID.
 
 ## Stop, restart and Windows reboot
 

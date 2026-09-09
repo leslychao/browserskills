@@ -17,13 +17,13 @@ $report=[ordered]@{passed=$false;startedAtUtc=[DateTime]::UtcNow.ToString('o');e
 $helperImage='postgres:17.9-bookworm@sha256:47f917f7409eacd22fc5dfb1dee634e1b55cf0c01d1a7eb701be2227a03e0641'
 $baseTag=$id+':base';$fixtureTag=$id+':fixture'
 function D([string[]]$Arguments){return Invoke-RemoteDocker $Arguments}
-function Dc([string]$Directory,[string]$Project,[string[]]$Arguments,[string]$Input=''){
-    return Invoke-RemoteDocker ((Get-ArchiveCompose $Project @((Join-Path $Directory compose.remote.json)))+$Arguments) $Input 300
+function Dc([string]$Directory,[string]$Project,[string[]]$Arguments,[string]$InputText=''){
+    return Invoke-RemoteDocker ((Get-ArchiveCompose $Project @((Join-Path $Directory compose.remote.json)))+$Arguments) $InputText 300
 }
 function Sql([string]$Directory,[string]$Project,[string]$Query){return Dc $Directory $Project @('exec','-T','postgres','psql','-U','postgres','-d','browserskills','-v','ON_ERROR_STOP=1','-Atc',$Query)}
 function DbEvidence([string]$Directory,[string]$Project){
     $result=[ordered]@{}
-    foreach($table in @('flyway_schema_history','users','browser_assignments','runs','run_items','ai_usage')){
+    foreach($table in @('flyway_schema_history','users','browser_assignments','runs','run_items','ai_usage','selection_settings')){
         $result[$table]=(Sql $Directory $Project "SELECT json_build_object('count',count(*),'digest',md5(COALESCE(string_agg(row_to_json(t)::text,E'\n' ORDER BY row_to_json(t)::text),''))) FROM $table t")|ConvertFrom-Json -AsHashtable
     };return $result
 }
@@ -82,7 +82,7 @@ try{
     AddPayload postgres_secrets 999 @{postgres_password=(Join-Path $secrets postgres_password);db_password=(Join-Path $secrets db_password)}
     $init=Join-Path $source init.sh;Write-Utf8 $init ((Get-Content -LiteralPath (Join-Path $repository ops/postgres/init.sh) -Raw).Replace("`r`n","`n"))
     AddPayload postgres_init 999 @{'10-browserskills.sh'=$init} $true
-    $config.services.api.volumes=@(@{type='volume';source='api_secrets';target='/run/secrets';read_only=$true;volume=@{nocopy=$true}})
+    $config.services.api.volumes+=@{type='volume';source='api_secrets';target='/run/secrets';read_only=$true;volume=@{nocopy=$true}}
     $config.services.postgres.volumes=@(@{type='volume';source='postgres';target='/var/lib/postgresql/data'},@{type='volume';source='postgres_secrets';target='/run/secrets';read_only=$true;volume=@{nocopy=$true}},@{type='volume';source='postgres_init';target='/docker-entrypoint-initdb.d';read_only=$true;volume=@{nocopy=$true}})
     foreach($n in 1..5){
         AddPayload "worker_${n}_secrets" 1001 @{worker_token=(Join-Path $secrets "worker_${n}_token")}
@@ -103,21 +103,29 @@ try{
     Dc $source $sourceProject @('up','-d','--no-build','postgres','api')|Out-Null;Wait-Api $source $sourceProject
     foreach($n in 1..5){
         Dc $source $sourceProject @('exec','-T','api','java','-jar','/app/api.jar','--spring.main.web-application-type=none','--spring.profiles.active=admin',"--create-user=remotert$n") ($password+"`n")|Out-Null
-        $run=[Guid]::NewGuid();$request=[Guid]::NewGuid();$item=[Guid]::NewGuid();$nonce=[Guid]::NewGuid();$usage=[Guid]::NewGuid();$hash='a'*64
+        $run=[Guid]::NewGuid();$request=[Guid]::NewGuid();$item=[Guid]::NewGuid();$usage=[Guid]::NewGuid();$hash='a'*64
         Sql $source $sourceProject @"
 SET ROLE browserskills;
 INSERT INTO runs(id,user_id,request_id,max_tasks,processed,status,generation,created_at,updated_at) SELECT '$run',id,'$request',1,1,'COMPLETED','fixture-$n',now(),now() FROM users WHERE login='remotert$n';
-INSERT INTO run_items(id,run_id,ordinal,project_id,task_id,snapshot_hash,instruction_hash,confirmation_nonce,status,option_id,created_at) VALUES('$item','$run',1,'owned-fixture','task-$n','$hash','$hash','$nonce','COMPLETED','option-$n',now());
-INSERT INTO ai_usage(id,user_id,request_id,snapshot_hash,instruction_hash,model_hash,status,result_json,created_at,completed_at) SELECT '$usage',id,'$request','$hash','$hash','fixture-no-inference','COMPLETED','{"type":"ANSWER","optionId":"option-$n"}',now(),now() FROM users WHERE login='remotert$n';
+INSERT INTO run_items(id,run_id,ordinal,pool_id,suite_id,snapshot_hash,instruction_hash,status,answer_json,created_at) VALUES('$item','$run',1,'owned-fixture','task-$n','$hash','$hash','SUBMITTED','{"decision":"ANSWER","reason":null,"answers":[{"partId":"part-1","fieldId":"field-1","value":"option-$n"}]}',now());
+INSERT INTO ai_usage(id,user_id,request_id,snapshot_hash,instruction_hash,model_hash,status,result_json,created_at,completed_at) SELECT '$usage',id,'$request','$hash','$hash','fixture-no-inference','COMPLETED','{"decision":"ANSWER","answers":[{"partId":"part-1","fieldId":"field-1","value":"option-$n"}],"reason":null}',now(),now() FROM users WHERE login='remotert$n';
+INSERT INTO selection_settings(user_id,settings_json) SELECT id,'{"mode":"AUTO","poolId":null,"includePoolIds":[],"excludePoolIds":[],"minReward":"1.00","modalities":["text"],"includeTraining":false,"includeExams":false}' FROM users WHERE login='remotert$n';
 "@|Out-Null
     };$password=$null
     $report.databaseBefore=DbEvidence $source $sourceProject
     Dc $source $sourceProject @('up','-d','--no-build','browser-1','browser-2','browser-3','browser-4','browser-5')|Out-Null
     $report.profilesBefore=@(Profiles $source $sourceProject seed)
+    $ephemeral=@(Get-EphemeralArchiveMounts $config)
+    if($ephemeral.Count -ne 6){throw 'Expected API scratch and five worker material volumes.'}
+    foreach($entry in $ephemeral){
+        $helper=Start-ArchiveHelper $helperImage $entry.name $id -Writable
+        try{D @('exec',$helper,'sh','-ec','printf disposable > /data/raw-material-marker')|Out-Null}finally{Stop-ArchiveHelper $helper $id}
+    }
     Write-Output 'Running the actual binary-stream remote backup.'
     Run-Backup $backup|Out-Null
     $manifest=Get-Content -LiteralPath (Join-Path $backup backup.json) -Raw|ConvertFrom-Json
     if(-not $manifest.profilesVerifiedClean -or $manifest.model.archived){throw 'Incorrect backup completeness/model attestation.'}
+    if(@($manifest.ephemeralVolumes).Count -ne 6 -or @($manifest.volumes|Where-Object sourceKey -In @($ephemeral.sourceKey)).Count){throw 'Temporary raw materials must be described but never archived.'}
     $report.backupSha256=(Get-FileHash -LiteralPath (Join-Path $backup backup.json)).Hash.ToLowerInvariant()
     $report.checks.backupCompleted=$true
     # Each refusal uses disposable data; no source/target application data is replaced.
@@ -134,6 +142,14 @@ INSERT INTO ai_usage(id,user_id,request_id,snapshot_hash,instruction_hash,model_
     $report.databaseAfter=DbEvidence $target $targetProject
     if(($report.databaseBefore|ConvertTo-Json -Depth 8 -Compress) -cne ($report.databaseAfter|ConvertTo-Json -Depth 8 -Compress)){throw 'Restored DB row digests differ.'}
     $targetConfig=Get-Content -LiteralPath (Join-Path $target compose.remote.json) -Raw|ConvertFrom-Json -AsHashtable
+    foreach($entry in @(Get-EphemeralArchiveMounts $targetConfig)){
+        $helper=Start-ArchiveHelper $helperImage $entry.name $id
+        try{
+            D @('exec',$helper,'sh','-ec','test ! -e /data/raw-material-marker')|Out-Null
+            if((D @('exec',$helper,'stat','-c','%u','/data')) -ne [string]$entry.uid){throw 'Restored scratch volume has the wrong runtime owner.'}
+        }finally{Stop-ArchiveHelper $helper $id}
+    }
+    $report.checks.temporaryMaterialsExcludedAndFresh=$true
     foreach($n in 1..5){$targetConfig.services["browser-$n"].environment.PROFILE_TEST_MODE='read'}
     Write-Utf8 (Join-Path $target compose.remote.json) ($targetConfig|ConvertTo-Json -Depth 100)
     Dc $target $targetProject @('up','-d','--no-build','browser-1','browser-2','browser-3','browser-4','browser-5')|Out-Null

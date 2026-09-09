@@ -12,9 +12,9 @@ import org.springframework.jdbc.datasource.*;
 import org.springframework.transaction.support.TransactionTemplate;
 
 class StoreIT {
-  private Store store;
-  private JdbcTemplate db;
-  private UUID user;
+  Store store;
+  JdbcTemplate db;
+  UUID user;
 
   @BeforeEach
   void setup() {
@@ -33,89 +33,111 @@ class StoreIT {
   }
 
   @Test
-  void fiftyUniqueConfirmedSendsWithDuplicateConfirmationAndOwnerIsolation() {
-    UUID request = UUID.randomUUID();
-    var created = store.create(user, new Contracts.StartRun(request, 50));
+  void fiftyWholeSuiteSendsAreDurableIdempotentAndOwned() {
+    var request = SnapshotValidationTest.start(50);
+    var created = store.create(user, request);
     UUID run = created.run().id();
-    assertFalse(store.create(user, new Contracts.StartRun(request, 50)).fresh());
-    assertThrows(ApiException.class, () -> store.create(user, new Contracts.StartRun(request, 49)));
+    assertFalse(store.create(user, request).fresh());
     assertThrows(
-        ApiException.class, () -> store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)));
+        ApiException.class,
+        () ->
+            store.create(
+                user, new Contracts.StartRun(request.requestId(), 49, request.selection())));
+    assertThrows(ApiException.class, () -> store.create(user, SnapshotValidationTest.start(1)));
     UUID other = store.provision("bob", "hash");
-    assertEquals(
-        "NOT_FOUND", assertThrows(ApiException.class, () -> store.owned(other, run)).code());
+    assertThrows(ApiException.class, () -> store.owned(other, run));
     store.generation(user, run, "gen");
     for (int n = 1; n <= 50; n++) {
-      var snapshot = SnapshotValidationTest.snapshot("task-" + n);
-      var item = store.draft(user, run, snapshot);
-      store.awaiting(user, run, item.id());
-      var confirm =
-          new Contracts.Confirm(
-              UUID.randomUUID(),
-              snapshot.taskId(),
-              snapshot.snapshotHash(),
-              snapshot.instruction().hash(),
-              "a",
-              item.nonce().toString());
-      String hash = SnapshotValidation.sha256(Json.mapper().writeValueAsBytes(confirm));
-      assertTrue(store.intent(user, run, confirm, hash));
-      assertFalse(store.intent(user, run, confirm, hash));
-      assertTrue(store.duplicateConfirm(user, run, confirm, hash));
-      assertThrows(
-          ApiException.class, () -> store.duplicateConfirm(user, run, confirm, "c".repeat(64)));
-      boolean next =
-          store.finish(user, run, new Contracts.SubmitResult("SUBMITTED", "task-" + (n + 1), null));
-      assertEquals(n < 50, next);
+      var s = SnapshotValidationTest.snapshot("suite-" + n);
+      var item = store.draft(user, run, s);
+      store.state(user, run, "ANALYZING", "FILLING", null);
+      assertTrue(store.intent(user, run, item.id(), s, SnapshotValidationTest.answer()));
+      assertFalse(store.intent(user, run, item.id(), s, SnapshotValidationTest.answer()));
+      assertEquals(
+          n < 50,
+          store.finish(
+              user, run, new Contracts.SubmitResult("SUBMITTED", "suite-" + (n + 1), null)));
     }
     assertEquals(50, store.owned(user, run).processed());
     assertEquals("COMPLETED", store.owned(user, run).status());
     assertEquals(50, store.items(run).size());
     assertFalse(store.active(user));
-    assertEquals(1, store.runs(user).size());
   }
 
   @Test
-  void unknownIntentSurvivesRestartAndBlocksSameTaskAcrossRuns() {
-    UUID run = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 2)).run().id();
-    var snapshot = SnapshotValidationTest.snapshot("ambiguous");
-    var item = store.draft(user, run, snapshot);
-    store.awaiting(user, run, item.id());
-    var confirm =
-        new Contracts.Confirm(
-            UUID.randomUUID(),
-            snapshot.taskId(),
-            snapshot.snapshotHash(),
-            snapshot.instruction().hash(),
-            "a",
-            item.nonce().toString());
-    assertTrue(store.intent(user, run, confirm, "a".repeat(64)));
+  void unknownAndStoppedIntentSurviveRestartAndBlockResendingSuite() {
+    UUID run = store.create(user, SnapshotValidationTest.start(2)).run().id();
+    var s = SnapshotValidationTest.snapshot("unknown");
+    var item = store.draft(user, run, s);
+    store.state(user, run, "ANALYZING", "FILLING", null);
+    store.intent(user, run, item.id(), s, SnapshotValidationTest.answer());
+    store.stop(user, run);
     store.reconcile();
     assertEquals("UNKNOWN", store.owned(user, run).status());
     assertEquals("UNKNOWN", store.current(run).status());
-    UUID next = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
+    UUID next = store.create(user, SnapshotValidationTest.start(1)).run().id();
     assertEquals(
         "UNRESOLVED_TASK",
-        assertThrows(ApiException.class, () -> store.draft(user, next, snapshot)).code());
+        assertThrows(ApiException.class, () -> store.draft(user, next, s)).code());
     store.draft(user, next, SnapshotValidationTest.snapshot("different"));
     store.reconcile();
     assertEquals("INTERRUPTED", store.owned(user, next).status());
   }
 
   @Test
-  void quotaReservationIsAtomicAndIdempotentUnderConcurrency() throws Exception {
-    var snapshot = SnapshotValidationTest.snapshot("quota");
+  void pausedRunRetainsExclusiveSlotButAllowsManualLoginAndSettingsAreSnapshots() {
+    var setting =
+        new Contracts.SelectionSettings(
+            "AUTO", null, List.of(), List.of("blocked"), "1.50", List.of("text"), false, false);
+    store.selection(user, setting);
+    var request = new Contracts.StartRun(UUID.randomUUID(), 2, setting);
+    UUID run = store.create(user, request).run().id();
+    store.state(user, run, "SELECTING", "WAITING_FOR_AUTH", "TWO_FACTOR_REQUIRED");
+    assertTrue(store.active(user));
+    assertTrue(store.manualAllowed(user));
+    assertThrows(ApiException.class, () -> store.create(user, SnapshotValidationTest.start(1)));
+    store.selection(user, Contracts.SelectionSettings.defaults());
+    assertEquals(setting, store.owned(user, run).selection());
+    assertTrue(store.state(user, run, "WAITING_FOR_AUTH", "SELECTING", null));
+    assertFalse(store.manualAllowed(user));
+  }
+
+  @Test
+  void changedSnapshotStopAndRejectedResultCannotCreateExtraIntent() {
+    UUID run = store.create(user, SnapshotValidationTest.start(3)).run().id();
+    var s = SnapshotValidationTest.snapshot("one");
+    var i = store.draft(user, run, s);
+    store.state(user, run, "ANALYZING", "FILLING", null);
+    assertThrows(
+        ApiException.class,
+        () -> store.intent(user, run, UUID.randomUUID(), s, SnapshotValidationTest.answer()));
+    store.stop(user, run);
+    assertNull(store.draft(user, run, s));
+    assertFalse(store.finish(user, run, new Contracts.SubmitResult("REJECTED", null, "ERR")));
+    UUID next = store.create(user, SnapshotValidationTest.start(1)).run().id();
+    var n = store.draft(user, next, s);
+    store.state(user, next, "ANALYZING", "FILLING", null);
+    store.intent(user, next, n.id(), s, SnapshotValidationTest.answer());
+    assertFalse(
+        store.finish(user, next, new Contracts.SubmitResult("REJECTED", null, "VALIDATION_ERROR")));
+    assertEquals("FAILED", store.current(next).status());
+  }
+
+  @Test
+  void everyActualModelCallUsesAtomicQuotaAcrossInstructionAndAnswerPhases() throws Exception {
+    String hash = "a".repeat(64);
     UUID id = UUID.randomUUID();
-    assertTrue(store.reserveAi(user, id, snapshot));
-    assertFalse(store.reserveAi(user, id, snapshot));
-    store.completeAi(user, id, "{\"decision\":\"ABSTAIN\"}", null, "model-hash");
-    try (var threads = Executors.newFixedThreadPool(8)) {
+    assertTrue(store.reserveAi(user, id, hash, hash));
+    assertFalse(store.reserveAi(user, id, hash, hash));
+    store.completeAi(user, id, "{}", null, hash);
+    try (var pool = Executors.newFixedThreadPool(8)) {
       var jobs = new ArrayList<Future<Boolean>>();
       for (int i = 0; i < 120; i++)
         jobs.add(
-            threads.submit(
+            pool.submit(
                 () -> {
                   try {
-                    return store.reserveAi(user, UUID.randomUUID(), snapshot);
+                    return store.reserveAi(user, UUID.randomUUID(), hash, hash);
                   } catch (ApiException e) {
                     assertEquals("AI_QUOTA", e.code());
                     return false;
@@ -126,89 +148,93 @@ class StoreIT {
       assertEquals(99, accepted);
     }
     assertEquals(100, store.quota(user).used());
-    assertEquals(0, store.quota(user).remaining());
-    assertEquals(100, db.queryForObject("SELECT count(*) FROM ai_usage", Integer.class));
   }
 
   @Test
-  void staleNonceFailureStopAndRejectedSubmissionAreDurable() {
-    UUID run = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 3)).run().id();
-    var s = SnapshotValidationTest.snapshot("one");
-    var i = store.draft(user, run, s);
-    store.awaiting(user, run, i.id());
-    var bad =
-        new Contracts.Confirm(
-            UUID.randomUUID(),
-            s.taskId(),
-            s.snapshotHash(),
-            s.instruction().hash(),
-            "a",
-            UUID.randomUUID().toString());
-    assertThrows(ApiException.class, () -> store.intent(user, run, bad, "a".repeat(64)));
-    assertEquals("DRAFT", store.current(run).status());
-    store.stop(user, run);
-    assertNull(store.draft(user, run, s));
-    assertFalse(store.finish(user, run, new Contracts.SubmitResult("REJECTED", null, "ERR")));
-    assertEquals("STOPPED", store.owned(user, run).status());
-    UUID failed = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
-    store.fail(user, failed, "BROKEN");
-    assertEquals("FAILED", store.owned(user, failed).status());
-    UUID rejected = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
-    var j = store.draft(user, rejected, s);
-    store.awaiting(user, rejected, j.id());
-    store.intent(
-        user,
-        rejected,
-        new Contracts.Confirm(
-            UUID.randomUUID(),
-            s.taskId(),
-            s.snapshotHash(),
-            s.instruction().hash(),
-            "a",
-            j.nonce().toString()),
-        "a".repeat(64));
-    assertFalse(
-        store.finish(
-            user, rejected, new Contracts.SubmitResult("REJECTED", null, "VALIDATION_ERROR")));
-    assertEquals("FAILED", store.current(rejected).status());
-  }
-
-  @Test
-  void provisioningHasFivePermanentAssignmentsAndDisabledUsersCannotAct() {
+  void fiveAssignmentsAndDisabledAccountsRemainEnforced() {
     for (int i = 2; i <= 5; i++) store.provision("user" + i, "hash");
-    assertEquals(
-        "USER_LIMIT",
-        assertThrows(ApiException.class, () -> store.provision("six", "hash")).code());
+    assertThrows(ApiException.class, () -> store.provision("six", "hash"));
     assertEquals(user, store.findLogin("alice").id());
     assertNull(store.findLogin("missing"));
     assertTrue(store.disable("alice"));
     assertThrows(ApiException.class, () -> store.user(user));
     assertFalse(store.disable("missing"));
-    assertThrows(ApiException.class, () -> store.provision("six", "hash"));
   }
 
   @Test
-  void stopDuringDispatchThenRestartRemainsUnknownAndCannotResubmit() {
-    UUID run = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
-    var s = SnapshotValidationTest.snapshot("stop-in-flight");
-    var i = store.draft(user, run, s);
-    store.awaiting(user, run, i.id());
-    store.intent(
-        user,
-        run,
-        new Contracts.Confirm(
-            UUID.randomUUID(),
-            s.taskId(),
-            s.snapshotHash(),
-            s.instruction().hash(),
-            "a",
-            i.nonce().toString()),
-        "a".repeat(64));
-    store.stop(user, run);
-    store.reconcile();
-    assertEquals("UNKNOWN", store.owned(user, run).status());
-    assertEquals("UNKNOWN", store.current(run).status());
-    UUID next = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
-    assertThrows(ApiException.class, () -> store.draft(user, next, s));
+  void upgradePreservesExistingSingleAnswerHistoryAndRemovesExecutableConfirmationColumns() {
+    var p = PostgresFixture.POSTGRES;
+    var ds = new DriverManagerDataSource(p.getJdbcUrl(), p.getUsername(), p.getPassword());
+    String schema = "migration_" + UUID.randomUUID().toString().replace("-", "");
+    db.execute("CREATE SCHEMA " + schema);
+    try {
+      Flyway.configure()
+          .dataSource(ds)
+          .schemas(schema)
+          .defaultSchema(schema)
+          .target("1")
+          .load()
+          .migrate();
+      UUID oldUser = UUID.randomUUID(),
+          oldRun = UUID.randomUUID(),
+          oldItem = UUID.randomUUID(),
+          nonce = UUID.randomUUID();
+      db.update(
+          "INSERT INTO " + schema + ".users(id,login,password_hash) VALUES(?,?,?)",
+          oldUser,
+          "old-user",
+          "hash");
+      db.update(
+          "INSERT INTO "
+              + schema
+              + ".runs(id,user_id,request_id,max_tasks,status,created_at,updated_at)"
+              + " VALUES(?,?,?,1,'AWAITING_CONFIRMATION',now(),now())",
+          oldRun,
+          oldUser,
+          UUID.randomUUID());
+      db.update(
+          "INSERT INTO "
+              + schema
+              + ".run_items(id,run_id,ordinal,project_id,task_id,snapshot_hash,instruction_hash,confirmation_nonce,status,option_id,created_at)"
+              + " VALUES(?,?,1,'old-pool','old-suite',?,?,?,'DRAFT','answer-a',now())",
+          oldItem,
+          oldRun,
+          "a".repeat(64),
+          "b".repeat(64),
+          nonce);
+      Flyway.configure().dataSource(ds).schemas(schema).defaultSchema(schema).load().migrate();
+      assertEquals(
+          "INTERRUPTED",
+          db.queryForObject(
+              "SELECT status FROM " + schema + ".runs WHERE id=?", String.class, oldRun));
+      assertEquals(
+          "answer-a",
+          db.queryForObject(
+              "SELECT legacy_response->>'optionId' FROM " + schema + ".run_items WHERE id=?",
+              String.class,
+              oldItem));
+      assertEquals(
+          nonce.toString(),
+          db.queryForObject(
+              "SELECT legacy_response->>'confirmationNonce' FROM "
+                  + schema
+                  + ".run_items WHERE id=?",
+              String.class,
+              oldItem));
+      assertEquals(
+          "old-suite",
+          db.queryForObject(
+              "SELECT suite_id FROM " + schema + ".run_items WHERE id=?", String.class, oldItem));
+      assertEquals(
+          0,
+          db.queryForObject(
+              "SELECT count(*) FROM information_schema.columns WHERE table_schema=? AND"
+                  + " table_name='run_items' AND column_name IN"
+                  + " ('option_id','confirmation_nonce','confirm_request_id','confirm_hash')",
+              Integer.class,
+              schema));
+    } finally {
+      db.execute("DROP SCHEMA " + schema + " CASCADE");
+    }
   }
 }

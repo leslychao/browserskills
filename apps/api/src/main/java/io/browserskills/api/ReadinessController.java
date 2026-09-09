@@ -80,7 +80,7 @@ public class ReadinessController {
         values.values().stream().allMatch("UP"::equals) ? "READY" : "DEGRADED",
         "components",
         values,
-        "manualReviewAvailable",
+        "manualBrowserAvailable",
         values.get("database").equals("UP")
             && values.entrySet().stream()
                 .anyMatch(e -> e.getKey().startsWith("browser-") && e.getValue().equals("UP")));

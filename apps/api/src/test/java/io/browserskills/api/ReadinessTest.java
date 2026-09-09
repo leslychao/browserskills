@@ -45,10 +45,10 @@ class ReadinessTest {
       long start = System.nanoTime();
       var result = health.ready(request);
       assertEquals("DEGRADED", result.get("status"));
-      assertEquals(true, result.get("manualReviewAvailable"));
+      assertEquals(true, result.get("manualBrowserAvailable"));
       assertTrue(System.nanoTime() - start < 3_000_000_000L);
       when(db.getConnection()).thenThrow(new SQLException("offline"));
-      assertEquals(false, health.ready(request).get("manualReviewAvailable"));
+      assertEquals(false, health.ready(request).get("manualBrowserAvailable"));
     } finally {
       health.close();
       server.stop(0);

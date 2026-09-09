@@ -11,7 +11,7 @@ afterEach(()=>vi.restoreAllMocks());
 it('opens the confirmed Yang catalogue by default without a test URL override',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'browserskills-yang-'));
   let currentUrl='about:blank';
-  const page={on:vi.fn(),goto:vi.fn(async(url:string)=>{currentUrl=url;}),url:()=>currentUrl,isClosed:()=>false};
+  const page={on:vi.fn(),goto:vi.fn(async(url:string)=>{currentUrl=url;}),url:()=>currentUrl,isClosed:()=>false,evaluate:vi.fn(async()=> 'UNKNOWN')};
   const context={pages:()=>[page],on:vi.fn(),setDefaultTimeout:vi.fn(),setDefaultNavigationTimeout:vi.fn(),close:vi.fn(async()=>{})};
   vi.spyOn(chromium,'launchPersistentContext').mockResolvedValue(context as unknown as BrowserContext);
   const owner=new BrowserOwner({workerId:'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media')});
@@ -21,10 +21,10 @@ it('opens the confirmed Yang catalogue by default without a test URL override',a
     expect(owner.status()).toMatchObject({mode:'IDLE',url:'https://yang.yandex-team.ru/?activeTab=all'});
     const runId=randomUUID();const generation=owner.status().generation!;
     await owner.command({id:randomUUID(),type:'BEGIN',generation,runId});
-    await expect(owner.command({id:randomUUID(),type:'SNAPSHOT',generation,runId})).rejects.toMatchObject({code:'UNSUPPORTED_TEMPLATE'});
+    await expect(owner.command({id:randomUUID(),type:'SNAPSHOT',generation,runId})).rejects.toMatchObject({code:'YANG_LOGIN_REQUIRED'});
     // The previous Tasks target must not remain an accepted production origin.
     currentUrl='https://tasks.yandex.ru/user';
-    await expect(owner.command({id:randomUUID(),type:'SNAPSHOT',generation,runId})).rejects.toMatchObject({code:'UNSUPPORTED_ORIGIN'});
+    await expect(owner.command({id:randomUUID(),type:'SNAPSHOT',generation,runId})).rejects.toMatchObject({code:'YANG_LOGIN_REQUIRED'});
   }finally{await owner.close();await rm(directory,{recursive:true,force:true});}
 });
 

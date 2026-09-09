@@ -148,7 +148,7 @@ function Container-Images([string]$Root, [switch]$IncludeApi) {
     }
     return $result
 }
-$tables = @('flyway_schema_history', 'users', 'browser_assignments', 'runs', 'run_items', 'ai_usage')
+$tables = @('flyway_schema_history', 'users', 'browser_assignments', 'runs', 'run_items', 'ai_usage', 'selection_settings')
 function Database-Evidence([string]$Root) {
     $result = [ordered]@{}
     foreach ($table in $tables) {
@@ -175,21 +175,22 @@ try {
         $password = $null
     }
     foreach ($number in 1..5) {
-        $run = [Guid]::NewGuid(); $item = [Guid]::NewGuid(); $usage = [Guid]::NewGuid(); $request = [Guid]::NewGuid(); $nonce = [Guid]::NewGuid()
+        $run = [Guid]::NewGuid(); $item = [Guid]::NewGuid(); $usage = [Guid]::NewGuid(); $request = [Guid]::NewGuid()
         $hash = ('a' * 64)
         $sql = @"
 SET ROLE browserskills;
 INSERT INTO runs(id,user_id,request_id,max_tasks,processed,status,generation,created_at,updated_at)
 SELECT '$run',id,'$request',1,1,'COMPLETED','fixture-$number',now(),now() FROM users WHERE login='roundtrip$number';
-INSERT INTO run_items(id,run_id,ordinal,project_id,task_id,snapshot_hash,instruction_hash,confirmation_nonce,status,option_id,created_at)
-VALUES('$item','$run',1,'owned-fixture','task-$number','$hash','$hash','$nonce','COMPLETED','option-$number',now());
+INSERT INTO run_items(id,run_id,ordinal,pool_id,suite_id,snapshot_hash,instruction_hash,status,answer_json,created_at)
+VALUES('$item','$run',1,'owned-fixture','task-$number','$hash','$hash','SUBMITTED','{"decision":"ANSWER","reason":null,"answers":[{"partId":"part-1","fieldId":"field-1","value":"option-$number"}]}',now());
 INSERT INTO ai_usage(id,user_id,request_id,snapshot_hash,instruction_hash,model_hash,status,result_json,created_at,completed_at)
-SELECT '$usage',id,'$request','$hash','$hash','fixture-no-inference','COMPLETED','{"type":"ANSWER","optionId":"option-$number"}',now(),now() FROM users WHERE login='roundtrip$number';
+SELECT '$usage',id,'$request','$hash','$hash','fixture-no-inference','COMPLETED','{"decision":"ANSWER","answers":[{"partId":"part-1","fieldId":"field-1","value":"option-$number"}],"reason":null}',now(),now() FROM users WHERE login='roundtrip$number';
+INSERT INTO selection_settings(user_id,settings_json) SELECT id,'{"mode":"AUTO","poolId":null,"includePoolIds":[],"excludePoolIds":[],"minReward":"1.00","modalities":["text"],"includeTraining":false,"includeExams":false}' FROM users WHERE login='roundtrip$number';
 "@
         Sql $source $sql | Out-Null
     }
     $report.databaseBefore = Database-Evidence $source
-    foreach ($table in @('users', 'browser_assignments', 'runs', 'run_items', 'ai_usage')) {
+    foreach ($table in @('users', 'browser_assignments', 'runs', 'run_items', 'ai_usage', 'selection_settings')) {
         if ($report.databaseBefore[$table].count -ne 5) { throw "Expected five actual rows in $table." }
     }
     Write-Output 'Seeding five real Chromium profiles with independent persistent cookies and localStorage.'

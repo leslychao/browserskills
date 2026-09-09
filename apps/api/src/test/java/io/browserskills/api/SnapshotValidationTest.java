@@ -2,150 +2,96 @@ package io.browserskills.api;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import java.util.List;
+import java.util.*;
 import org.junit.jupiter.api.Test;
 
 class SnapshotValidationTest {
-  static Contracts.TaskSnapshot snapshot(String task) {
-    return new Contracts.TaskSnapshot(
-        "project",
-        task,
-        "Question",
-        new Contracts.InstructionBundle(
-            "rules",
-            "a".repeat(64),
-            List.of(new Contracts.InstructionBlock("text", "Read all instructions", null, null))),
-        null,
-        null,
-        List.of(new Contracts.Option("a", "A"), new Contracts.Option("b", "B")),
-        "b".repeat(64),
-        null,
-        "v1");
-  }
-
-  @Test
-  void validatesCompleteInstructionsAndStrictModelOutput() {
-    assertDoesNotThrow(() -> SnapshotValidation.validate(snapshot("1")));
-    assertEquals(
-        "a",
-        SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"optionId\":\"a\"}",
-                snapshot("1").options(),
-                Json.mapper())
-            .optionId());
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"optionId\":\"x\"}",
-                snapshot("1").options(),
-                Json.mapper()));
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.decision(
-                "{\"decision\":\"ABSTAIN\",\"tool\":\"click\"}",
-                snapshot("1").options(),
-                Json.mapper()));
-  }
-
-  @Test
-  void rejectsMissingInstructionsOversizedTextAudioAndDuplicateOptions() {
-    var s = snapshot("t");
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.validate(
-                new Contracts.TaskSnapshot(
-                    s.projectId(),
-                    s.taskId(),
-                    s.question(),
-                    null,
-                    null,
-                    null,
-                    s.options(),
-                    s.snapshotHash(),
-                    null,
-                    "v1")));
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.validate(
-                new Contracts.TaskSnapshot(
-                    s.projectId(),
-                    s.taskId(),
-                    "x".repeat(600000),
-                    s.instruction(),
-                    null,
-                    null,
-                    s.options(),
-                    s.snapshotHash(),
-                    null,
-                    "v1")));
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.validate(
-                new Contracts.TaskSnapshot(
-                    s.projectId(),
-                    s.taskId(),
-                    s.question(),
-                    s.instruction(),
-                    null,
-                    null,
-                    List.of(new Contracts.Option("a", "A"), new Contracts.Option("a", "Again")),
-                    s.snapshotHash(),
-                    null,
-                    "v1")));
-    var a = new Contracts.MediaAsset("a", "audio", "audio/wav", 44, "c".repeat(64), 60001L);
-    assertThrows(
-        ApiException.class,
-        () ->
-            SnapshotValidation.validate(
-                new Contracts.TaskSnapshot(
-                    s.projectId(),
-                    s.taskId(),
-                    s.question(),
-                    s.instruction(),
-                    null,
-                    a,
-                    s.options(),
-                    s.snapshotHash(),
-                    null,
-                    "v1")));
-    var valid = new Contracts.MediaAsset("a", "audio", "audio/wav", 44, "c".repeat(64), 1000L);
-    var image = new Contracts.MediaAsset("im", "image", "image/png", 8, "d".repeat(64), null);
-    var instructions =
+  static Contracts.TaskSet snapshot(String suite) {
+    return new Contracts.TaskSet(
+        "pool",
+        suite,
+        List.of(
+            new Contracts.TaskPart(
+                "part",
+                "Example",
+                "Choose A",
+                List.of(),
+                List.of(
+                    new Contracts.TaskField(
+                        "field",
+                        "Answer",
+                        "SINGLE_CHOICE",
+                        true,
+                        List.of(new Contracts.Option("a", "A"), new Contracts.Option("b", "B")),
+                        null,
+                        0,
+                        null,
+                        null,
+                        null)),
+                List.of())),
         new Contracts.InstructionBundle(
             "rules",
             "a".repeat(64),
             List.of(
-                new Contracts.InstructionBlock("audio", null, valid, "Hear tone"),
-                new Contracts.InstructionBlock("image", null, image, null)));
-    var combined =
-        new Contracts.TaskSnapshot(
-            s.projectId(),
-            s.taskId(),
-            s.question(),
-            instructions,
-            image,
-            valid,
-            s.options(),
+                new Contracts.InstructionBlock(
+                    "rule", "text", "Choose the correct letter", null, null))),
+        "b".repeat(64),
+        null,
+        "yang-v2");
+  }
+
+  static Contracts.AnswerSet answer() {
+    return new Contracts.AnswerSet(
+        "ANSWER", List.of(new Contracts.FieldAnswer("part", "field", "a")), null);
+  }
+
+  static Contracts.StartRun start(int limit) {
+    return new Contracts.StartRun(UUID.randomUUID(), limit, Contracts.SelectionSettings.defaults());
+  }
+
+  @Test
+  void entireSetMustHaveUniqueFieldsAndWellFormedInstructions() {
+    var s = snapshot("suite");
+    SnapshotValidation.validate(s);
+    var duplicated =
+        new Contracts.TaskSet(
+            s.poolId(),
+            s.suiteId(),
+            List.of(s.parts().getFirst(), s.parts().getFirst()),
+            s.instruction(),
             s.snapshotHash(),
             null,
-            "v1");
-    assertDoesNotThrow(() -> SnapshotValidation.validate(combined));
-    assertEquals(2, SnapshotValidation.assets(combined).size());
-    assertNull(
-        SnapshotValidation.decision("{\"decision\":\"ABSTAIN\"}", s.options(), Json.mapper())
-            .optionId());
-    assertThrows(
-        ApiException.class,
-        () -> SnapshotValidation.decision("not-json", s.options(), Json.mapper()));
+            s.adapterVersion());
+    assertThrows(ApiException.class, () -> SnapshotValidation.validate(duplicated));
+  }
+
+  @Test
+  void modelCannotInventReferencesOrIncompleteFinalAnswers() {
+    var s = snapshot("suite");
+    SnapshotValidation.answers(s, answer(), true);
     assertThrows(
         ApiException.class,
         () ->
-            SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"decision\":\"ABSTAIN\"}", s.options(), Json.mapper()));
+            SnapshotValidation.answers(
+                s, new Contracts.AnswerSet("ANSWER", List.of(), null), true));
+    assertThrows(
+        ApiException.class,
+        () ->
+            SnapshotValidation.answers(
+                s,
+                new Contracts.AnswerSet(
+                    "ANSWER", List.of(new Contracts.FieldAnswer("part", "field", "evil")), null),
+                true));
+  }
+
+  @Test
+  void mediaMetadataAndHashAreBounded() {
+    assertEquals(64, SnapshotValidation.sha256(new byte[] {1}).length());
+    assertThrows(
+        ApiException.class,
+        () ->
+            SnapshotValidation.validateAsset(
+                new Contracts.MediaAsset("x", "audio", "audio/wav", 1, "a".repeat(64), 120001L),
+                "audio"));
   }
 }

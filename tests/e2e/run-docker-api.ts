@@ -48,7 +48,7 @@ try{
   }
   assert(databaseReady,'PostgreSQL startup timed out');
   const workerSettings=Array.from({length:5},(_,i)=>['--env',`API_WORKER_${i+1}_URL=http://127.0.0.1:1`,...mount(`worker_${i+1}_token`)]).flat();
-  await command('docker',['run','--detach','--rm','--init','--name',api,'--network',network,'--read-only','--cap-drop=ALL','--security-opt','no-new-privileges','--memory','2g','--pids-limit','256','--tmpfs','/tmp:size=268435456,mode=1777','--publish','127.0.0.1::8080','--env',`BROWSERSKILLS_DB_URL=jdbc:postgresql://${postgres}:5432/browserskills`,'--env','BROWSERSKILLS_DB_USERNAME=browserskills','--env','BROWSERSKILLS_PUBLIC_ORIGIN=http://127.0.0.1:8080','--env','API_INFERENCE_URL=http://127.0.0.1:1',...mount('db_password'),...workerSettings,process.env.API_DOCKER_IMAGE??'browserskills-api:local']);containers.push(api);
+  await command('docker',['run','--detach','--rm','--init','--name',api,'--network',network,'--read-only','--cap-drop=ALL','--security-opt','no-new-privileges','--memory','2g','--pids-limit','256','--tmpfs','/tmp:size=268435456,mode=1777','--tmpfs','/data/materials:size=67108864,uid=10001,gid=10001,mode=0700','--publish','127.0.0.1::8080','--env',`BROWSERSKILLS_DB_URL=jdbc:postgresql://${postgres}:5432/browserskills`,'--env','BROWSERSKILLS_DB_USERNAME=browserskills','--env','BROWSERSKILLS_PUBLIC_ORIGIN=http://127.0.0.1:8080','--env','API_INFERENCE_URL=http://127.0.0.1:1',...mount('db_password'),...workerSettings,process.env.API_DOCKER_IMAGE??'browserskills-api:local']);containers.push(api);
   const port=Number((await command('docker',['port',api,'8080/tcp'])).split(':').at(-1));
   let cookie='';
   const cookies:string[]=[];
@@ -76,7 +76,7 @@ try{
   assert.equal((await request('/api/me')).status,401);
   assert.equal((await request('/health/ready')).status,404,'Readiness must stay private');
   const readiness=JSON.parse(await command('docker',['exec',api,'curl','--fail','--silent','--max-time','10','http://127.0.0.1:8080/health/ready']));
-  assert.equal(readiness.status,'DEGRADED');assert.equal(readiness.components.database,'UP');assert.equal(readiness.components.inference,'DOWN');assert.equal(readiness.manualReviewAvailable,false);
+  assert.equal(readiness.status,'DEGRADED');assert.equal(readiness.components.database,'UP');assert.equal(readiness.components.inference,'DOWN');assert.equal(readiness.manualBrowserAvailable,false);
   for(let i=1;i<=5;i++)assert.equal(readiness.components[`browser-${i}`],'DOWN');
   await command('docker',['exec','-i',api,'java','-jar','/app/api.jar','--spring.main.web-application-type=none','--spring.profiles.active=admin','--create-user=smoke'],password+'\n');
   assert.equal((await request('/api/auth/login','POST',{login:'smoke',password})).status,403,'CSRF is required');

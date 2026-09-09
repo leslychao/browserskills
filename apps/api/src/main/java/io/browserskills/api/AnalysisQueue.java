@@ -4,14 +4,13 @@ import jakarta.annotation.PreDestroy;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
+import java.util.function.Function;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
 public class AnalysisQueue {
   private final ThreadPoolExecutor executor =
       new ThreadPoolExecutor(
@@ -23,130 +22,122 @@ public class AnalysisQueue {
           Thread.ofPlatform().name("inference-", 0).factory(),
           new ThreadPoolExecutor.AbortPolicy());
   private final Set<UUID> queued = ConcurrentHashMap.newKeySet();
-  private final ScheduledThreadPoolExecutor deadlines =
-      new ScheduledThreadPoolExecutor(1, Thread.ofPlatform().name("analysis-deadlines").factory());
   private final Store store;
-  private final InferenceClient model;
   private final JsonMapper json;
   private final Clock clock;
   private final String modelHash;
 
   public AnalysisQueue(
       Store store,
-      InferenceClient model,
       JsonMapper json,
       Clock clock,
       @Value("${API_MODEL_SHA256:unverified}") String modelHash) {
     this.store = store;
-    this.model = model;
     this.json = json;
     this.clock = clock;
     this.modelHash = modelHash;
-    deadlines.setRemoveOnCancelPolicy(true);
   }
 
-  public void submit(
+  public <T> T call(
       UUID user,
       UUID run,
-      Materials.Current current,
-      BiConsumer<Contracts.Decision, Contracts.ApiError> callback) {
-    if (!queued.add(user)) {
-      callback.accept(
-          null, new Contracts.ApiError("AI_BUSY", "An analysis is already active for this user."));
-      return;
-    }
-    Instant queuedAt = clock.instant();
-    AtomicBoolean claimed = new AtomicBoolean();
-    AtomicBoolean expired = new AtomicBoolean();
-    AtomicReference<ScheduledFuture<?>> alarmReference = new AtomicReference<>();
-    Runnable task =
-        () -> {
-          if (!claimed.compareAndSet(false, true) || expired.get()) return;
-          var alarm = alarmReference.get();
-          if (alarm != null) alarm.cancel(false);
-          execute(user, run, current, callback, queuedAt);
-        };
-    Instant deadline = queuedAt.plusSeconds(120);
-    if (current.snapshot().expiresAt() != null && current.snapshot().expiresAt().isBefore(deadline))
-      deadline = current.snapshot().expiresAt();
-    ScheduledFuture<?> alarm =
-        deadlines.schedule(
-            () -> {
-              if (claimed.compareAndSet(false, true)) {
-                expired.set(true);
-                executor.remove(task);
-                queued.remove(user);
-                callback.accept(
-                    null,
-                    new Contracts.ApiError(
-                        "AI_QUEUE_TIMEOUT",
-                        "Analysis queue or task deadline exceeded. Select manually."));
-              }
-            },
-            Math.max(0, Duration.between(queuedAt, deadline).toMillis()),
-            TimeUnit.MILLISECONDS);
-    alarmReference.set(alarm);
+      String snapshotHash,
+      String instructionHash,
+      Instant expires,
+      Function<Duration, T> action) {
+    if (!queued.add(user))
+      throw new ApiException(503, "AI_BUSY", "An inference is already active for this user.");
+    Instant enqueued = clock.instant();
+    Instant deadline = enqueued.plusSeconds(120);
+    if (expires != null && expires.isBefore(deadline)) deadline = expires;
+    long wait = Math.max(1, Duration.between(enqueued, deadline).toMillis());
+    var started = new java.util.concurrent.atomic.AtomicBoolean();
+    Future<T> future;
     try {
-      executor.execute(task);
+      future =
+          executor.submit(
+              () -> {
+                started.set(true);
+                try {
+                  var r = store.owned(user, run);
+                  if (!Set.of("SELECTING", "PREPARING", "ANALYZING", "FILLING")
+                      .contains(r.status()))
+                    throw new ApiException(409, "RUN_STOPPED", "Run stopped.");
+                  Instant now = clock.instant();
+                  if (!now.isBefore(enqueued.plusSeconds(120)))
+                    throw new ApiException(
+                        503, "AI_QUEUE_TIMEOUT", "Inference queue deadline exceeded.");
+                  Duration timeout = Duration.ofSeconds(120);
+                  if (expires != null) {
+                    Duration left = Duration.between(now, expires);
+                    if (left.isZero() || left.isNegative())
+                      throw new ApiException(409, "TASK_EXPIRED", "Task expired.");
+                    if (left.compareTo(timeout) < 0) timeout = left;
+                  }
+                  UUID request = UUID.randomUUID();
+                  if (!store.reserveAi(user, request, snapshotHash, instructionHash))
+                    throw new ApiException(
+                        409, "ANALYSIS_ALREADY_ATTEMPTED", "Inference was already attempted.");
+                  try {
+                    T result = action.apply(timeout);
+                    store.completeAi(
+                        user,
+                        request,
+                        json.writeValueAsString(
+                            Map.of(
+                                "resultSha256",
+                                SnapshotValidation.sha256(json.writeValueAsBytes(result)))),
+                        null,
+                        modelHash);
+                    return result;
+                  } catch (ApiException e) {
+                    store.completeAi(user, request, null, e.code(), modelHash);
+                    throw e;
+                  } catch (Exception e) {
+                    store.completeAi(user, request, null, "AI_UNAVAILABLE", modelHash);
+                    throw new ApiException(503, "AI_UNAVAILABLE", "Inference failed.");
+                  }
+                } finally {
+                  queued.remove(user);
+                }
+              });
     } catch (RejectedExecutionException e) {
-      alarm.cancel(false);
-      if (claimed.compareAndSet(false, true)) {
-        queued.remove(user);
-        callback.accept(
-            null, new Contracts.ApiError("AI_BUSY", "Analysis queue is full. Select manually."));
-      }
-    }
-  }
-
-  private void execute(
-      UUID user,
-      UUID run,
-      Materials.Current current,
-      BiConsumer<Contracts.Decision, Contracts.ApiError> callback,
-      Instant queuedAt) {
-    try {
-      if (!store.owned(user, run).status().equals("ANALYZING")) return;
-      Instant now = clock.instant(), expires = current.snapshot().expiresAt();
-      if (now.isAfter(queuedAt.plusSeconds(120)))
-        throw new ApiException(
-            503, "AI_QUEUE_TIMEOUT", "Analysis queue deadline exceeded. Select manually.");
-      Duration timeout = Duration.ofSeconds(120);
-      if (expires != null) {
-        timeout = Duration.between(now, expires);
-        if (timeout.isNegative() || timeout.isZero())
-          throw new ApiException(409, "TASK_EXPIRED", "Task has expired.");
-        if (timeout.compareTo(Duration.ofSeconds(120)) > 0) timeout = Duration.ofSeconds(120);
-      }
-      if (!store.reserveAi(user, current.itemId(), current.snapshot()))
-        throw new ApiException(
-            409,
-            "ANALYSIS_ALREADY_ATTEMPTED",
-            "This analysis was already attempted. Select manually.");
-      Contracts.Decision decision;
-      try {
-        decision = model.analyze(current, timeout);
-        store.completeAi(
-            user, current.itemId(), json.writeValueAsString(decision), null, modelHash);
-      } catch (ApiException e) {
-        store.completeAi(user, current.itemId(), null, e.code(), modelHash);
-        throw e;
-      }
-      callback.accept(decision, null);
-    } catch (ApiException e) {
-      callback.accept(null, new Contracts.ApiError(e.code(), e.getMessage()));
-    } catch (Exception e) {
-      callback.accept(
-          null,
-          new Contracts.ApiError(
-              "AI_UNAVAILABLE", "Analysis could not be completed. Select manually."));
-    } finally {
       queued.remove(user);
+      throw new ApiException(503, "AI_BUSY", "Inference queue is full.");
+    }
+    try {
+      // Wait for queue entry first; processing gets its own bounded 120-second deadline.
+      long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(wait);
+      while (!started.get()) {
+        long left = until - System.nanoTime();
+        if (left <= 0) {
+          future.cancel(false);
+          executor.purge();
+          queued.remove(user);
+          throw new ApiException(503, "AI_QUEUE_TIMEOUT", "Inference queue deadline exceeded.");
+        }
+        try {
+          return future.get(
+              Math.min(TimeUnit.NANOSECONDS.toMillis(left) + 1, 20), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException ignored) {
+        }
+      }
+      return future.get(121, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      future.cancel(true);
+      throw new ApiException(409, "RUN_STOPPED", "Run interrupted.");
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      throw new ApiException(503, "MODEL_TIMEOUT", "Inference deadline exceeded.");
+    } catch (ExecutionException e) {
+      if (e.getCause() instanceof ApiException api) throw api;
+      throw new ApiException(503, "AI_UNAVAILABLE", "Inference failed.");
     }
   }
 
   @PreDestroy
   void close() {
     executor.shutdownNow();
-    deadlines.shutdownNow();
   }
 }

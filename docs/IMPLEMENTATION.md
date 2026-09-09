@@ -1,110 +1,104 @@
-# Accepted implementation contract
+# BrowserSkills: действующий договор реализации
 
-This document records the accepted server-only Yandex Yang MVP (2026-09-09). No Electron, CSV, recorder, arbitrary-site workflows or Ollama remain in the final implementation.
+Дата: 2026-09-09. Этот документ заменяет прежний контракт одного варианта ответа и ручного подтверждения. Наблюдения реального Янг находятся отдельно в [YANG-MIGRATION.md](YANG-MIGRATION.md); результаты проверок — в [verification.md](verification.md).
 
-Target correction (2026-09-09): the user identified `https://yang.yandex-team.ru/?activeTab=all` as the actual working site and confirmed its corporate `passport.yandex-team.ru` sign-in. This replaces the previously assumed `tasks.yandex.ru` target. OPEN and the production adapter origin must use Yang only. Existing task/instruction/media/confirmation constraints remain in force; template selectors must be verified on an authenticated Yang task. Earlier Tasks demo observations cannot establish Yang compatibility.
+## Результат и границы
 
-Transport amendment (2026-09-09): the user explicitly selected ordinary HTTP on the LAN after declining client certificate installation. The canonical app origin is `http://192.168.0.107:8080`; this replaces the initial mandatory HTTPS deployment. Login, CSRF, session ownership and worker isolation remain required. The HTTP session cookie keeps HttpOnly/SameSite=Lax and omits Secure; no certificate installation or browser-security bypass is part of setup.
+Docker на Windows-сервере `192.168.0.107`; интерфейс `http://192.168.0.107:8080`. Пять заранее созданных пользователей максимум, пять изолированных постоянных профилей Chromium, один активный запуск на пользователя. Desktop-приложение, расширение, CSV, сертификаты и произвольные сайты не входят в продукт.
 
-## Product
+Пользователь входит в приложение, подключает Янг через встроенный серверный браузер, проходит корпоративный вход и второй фактор, выбирает проект вручную либо включает автовыбор, задаёт предел 1–50 целых наборов и нажимает «Запустить». Исполнитель заполняет и отправляет набор автоматически. Подтверждения каждого ответа нет.
 
-- Five provisioned application users maximum, each permanently assigned a distinct browser worker and persistent Chromium volume. One active run per user, 1–50 tasks per run.
-- A user logs into the app, opens their server browser via noVNC, signs into Yandex manually, opens a compatible project/task and starts a run. Every answer requires explicit confirmation in our UI; the proposed option can be changed.
-- One whole task per submission, 2–10 options, exactly one answer. Text and/or one image and/or one audio clip. Audio includes speech content, environmental sounds, music and prosody. Free text, multiple questions per submit, video, DRM/live streams and channel-specific stereo analysis are outside v1.
-- Full project instructions, task-specific rules and examples are required. Preserve text structure and linked image/audio examples. No silent truncation or summarization. Inaccessible/unsupported instructions block AI analysis.
-- Audio task clip maximum 60 seconds / 20 MiB; total audio including instruction examples maximum 120 seconds. Preserve original bytes for the user's HTML audio player; normalize only the inference representation. No denoising, silence removal or speed changes.
-- Instruction changes invalidate all pending proposals/confirmations. Instruction and task materials are untrusted data, never executable automation instructions.
+Поддерживаемые материалы: текст, изображения, аудио. Поля: одиночный и множественный выбор, текст, число, оценки и сравнения, включая условные поля. Видео, рисование, загрузка файлов, DRM, внешние действия и неизвестные элементы формы блокируются с причиной. Наличие распознанной формы не означает допуска модели к автоматической отправке.
 
-## Architecture
+## Владельцы и хранение
 
-- apps/api: Spring Boot 4.1.1 / Java 21, Spring Security, JDBC, Flyway, PostgreSQL 17. Serves production React assets and LAN HTTP.
-- apps/web: React 19 / TypeScript / Vite; noVNC and native audio player. Same origin session authentication; poll current run every second.
-- apps/browser: Node 24 / TypeScript / Playwright 1.63.0; fixed Yandex adapter, persistent Chromium, Xvfb/x11vnc and an authenticated WebSocket-to-RFB bridge. No general recorder.
-- inference: llama.cpp CUDA, Qwen2.5-Omni-7B converted from the official Apache-2.0 Qwen weights to Q4_K_M + Q8_0 mmproj. Text JSON output only; no Talker. One request at a time, 8192-token context, GPU language layers and CPU mmproj initially. Pin source revisions and hashes. Never claim actual .107 GPU performance from source or fixture tests.
-- Docker Compose on Windows via Docker Desktop WSL2. Fixed browser-1..5 services, separate profiles; no Docker socket. Only API HTTP8080 is published. Native Windows scripts prepare/check Docker deployment, not WinSW/native application services.
-- PostgreSQL, models and five browser profiles use separate persistent volumes. Active instructions/media use bounded ephemeral storage and are removed at task/run completion. No raw media, credentials, cookies or request bodies in logs/history.
+- `apps/api`: Spring Boot/Java21, Spring Security, JDBC/Flyway/PostgreSQL; подключения, сохранённый выбор, запуск, инструкции, очередь модели, проверка ответов и журнал отправки. Production React обслуживается этим же HTTP origin.
+- `apps/browser`: Node24/Playwright, YangAdapter и общий извлекатель форм, постоянный Chromium, Xvfb/x11vnc, авторизованный RFB-мост. Единственный владелец профиля и DOM; браузер не получает Docker socket.
+- `apps/web`: React/TypeScript, каталог, выбор, прогресс, история, исходные материалы и noVNC. Подтверждение ответа заменено наблюдением за выполнением.
+- `contracts`: проверяемые TypeScript/Zod схемы; Java records и тесты поддерживают тот же HTTP контракт.
+- `inference`: локальная Qwen2.5-Omni-7B Q4_K_M с Q8_0 mmproj через закреплённый llama.cpp CUDA. Никаких облачных запросов, инструментов или исполняемых команд модели.
 
-## Public HTTP contract
+Постоянны PostgreSQL, модель и пять отдельных профилей. Временные оригиналы хранятся в пяти дисковых media volumes; API использует отдельный ограниченный рабочий кеш. Бюджет на пользователя — 960MiB оригиналов worker +64MiB рабочего кеша API, всего до1GiB. Один файл до20MiB; одна порция модели до64MiB. Старые материалы набора освобождаются, исходники инструкции сохраняются до завершения запуска. При завершении, остановке и рестарте временные данные удаляются. Backup сохраняет БД, профили и секреты, но не сырые материалы; restore создаёт пустые временные volumes.
 
-All JSON fields use camelCase. Dates use ISO-8601 UTC strings. Errors: {code, message}. Unknown/foreign resources must not disclose another owner's data.
+## Вход и управление
 
-- GET /api/auth/csrf -> {token, headerName}; usable before login.
-- POST /api/auth/login {login,password} -> {id,login}; JSON login with session fixation protection, CSRF. HttpOnly SameSite=Lax cookie, without Secure for the agreed LAN HTTP deployment; 1h absolute session lifetime. Sessions are in-memory, restart requires login.
-- POST /api/auth/logout -> 204; invalidate session and close its manual view/control.
-- GET /api/me -> {id,login,quota:{limit,used,remaining,resetsAt}}.
-- GET /api/browser -> BrowserStatus.
-- POST /api/browser -> BrowserStatus (open user's persistent browser on https://yang.yandex-team.ru/?activeTab=all).
-- POST /api/browser/manual-control -> BrowserStatus (exclusive authenticated session owner); DELETE same path releases it.
-- WS /api/browser/view -> binary RFB. Verify authenticated session, exact Origin and control lease; enforce expiry/revocation on existing connection. Client viewOnly is never an authorization control.
-- POST /api/runs {requestId,maxTasks} -> RunView, starts from current browser task. Close/revoke manual control before automation. requestId is idempotent per user; changed payload with same id is conflict.
-- GET /api/runs -> RunSummary[]; GET /api/runs/{id} -> RunView.
-- POST /api/runs/{id}/confirm {requestId,taskId,snapshotHash,instructionHash,optionId,confirmationNonce} -> RunView. Consume confirmation atomically, store submit intent before dispatch, never retry dispatch on network uncertainty.
-- POST /api/runs/{id}/stop -> RunView.
-- GET /api/runs/{id}/media/{assetId} -> bounded original bytes with content type, owner authorization, Cache-Control:no-store, single-range support for audio.
-- GET /health/live -> {status:"UP"}; readiness is internal and must distinguish DB/browser/inference. Model unavailability permits manual review when extraction is complete.
+OPEN открывает только `https://yang.yandex-team.ru/?activeTab=all`. Корпоративный вход выполняется самим пользователем в noVNC. Состояния подключения: `LOGIN_REQUIRED`, `TWO_FACTOR_REQUIRED`, `READY`, `AUTH_EXPIRED`, `UNKNOWN`. READY требует признаков авторизованного каталога/задания; совпадение URL само по себе недостаточно.
 
-## Shared data (contracts package)
+Успешный вход определяется автоматически. Вход в Chrome/Codex не переносится в серверный Chromium. Профиль запускается штатным `launchPersistentContext`. При запросе повторного входа запуск переходит в WAITING_FOR_AUTH; PAUSE освобождает управление браузером, сохраняя профиль. Пользователь проходит вход и нажимает «Продолжить». Исполнитель проверяет поколение браузера, срок и идентичность набора до следующих действий.
 
-MediaAsset {id,kind:"image"|"audio",mimeType,byteLength,sha256,durationMs?:number}.
-InstructionBlock = {type:"text",text} | {type:"image"|"audio",asset:MediaAsset,caption?:string}.
-InstructionBundle {sourceKey,hash,blocks:InstructionBlock[]}.
-TaskSnapshot {projectId,taskId,question,instruction,image:MediaAsset|null,audio:MediaAsset|null,options:[{id,label}],snapshotHash,expiresAt:string|null,adapterVersion}.
-Decision {decision:"ANSWER",optionId} | {decision:"ABSTAIN"}.
-ReviewTask = TaskSnapshot + {proposal:Decision|null,aiError:{code,message}|null,confirmationNonce}.
-RunSummary {id,status,maxTasks,processed,createdAt,updatedAt,error:{code,message}|null}.
-RunView = RunSummary + {current:ReviewTask|null,results:RunItemResult[]}.
-RunItemResult {taskId,ordinal,status,optionId:string|null,code:string|null,createdAt}.
-Run status: PREPARING, ANALYZING, AWAITING_CONFIRMATION, SUBMITTING, COMPLETED, STOPPED, INTERRUPTED, UNKNOWN, FAILED.
-Item status: DRAFT, SUBMIT_INTENT, SUBMITTED, UNKNOWN, FAILED.
-BrowserStatus {workerId,generation:string|null,mode:"CLOSED"|"IDLE"|"MANUAL"|"AUTOMATION",url:string|null,runId:string|null}.
+Ручное управление принадлежит конкретной сессии приложения. BEGIN отзывает существующие RFB-сокеты до первого действия. Logout/истечение сессии/STOP/CLOSE также отзывают управление. HTTP LAN выбран пользователем: cookie HttpOnly/SameSite=Lax без Secure; CSRF и проверка точного Origin сохраняются. Пароли/OTP/cookies не пишутся в журналы.
 
-## Private worker protocol (API is sole caller)
+## Каталог и выбор
 
-HTTP bearer token from per-worker secret file. No arbitrary worker URL from public client. Fixed worker addresses configured server-side.
+`CatalogueItem`: poolId, title, reward `{amount: decimalString, unit}` либо null, availability (`AVAILABLE`, `ACTIVE`, `UNAVAILABLE`), kind (`WORK`, `TRAINING`, `EXAM`), modalities, preparation (`UNPREPARED`, `READY`, `BLOCKED`), reason.
 
-- GET /internal/status -> BrowserStatus.
-- POST /internal/commands {id,type,generation?,runId?,payload?} -> JSON result directly; errors {code,message} with appropriate HTTP status.
-- OPEN -> BrowserStatus; ENTER_MANUAL -> BrowserStatus; EXIT_MANUAL -> BrowserStatus (disconnect all input sockets); BEGIN with generation and runId -> BrowserStatus (revoke input, claim automation ownership).
-- SNAPSHOT with generation/runId -> TaskSnapshot. Check fixed supported adapter and complete instruction/material capture.
-- SUBMIT with generation/runId and payload {taskId,snapshotHash,instructionHash,optionId} -> {outcome:"SUBMITTED"|"COMPLETE"|"UNKNOWN"|"REJECTED",nextTaskId?:string,code?:string}.
-- STOP with generation/runId -> BrowserStatus; CLOSE -> BrowserStatus.
-- GET /internal/media/{assetId} -> original bytes, supports Range. IDs bound to current worker generation/task; no filesystem path input.
-- WS /internal/view -> authenticated RFB bridge, usable only in MANUAL mode; actively disconnect on EXIT_MANUAL/BEGIN/STOP/CLOSE.
-- Commands serialized, STOP cancels pending actions; in-memory dedup by command id and generation. Worker restart changes generation and never resumes a run.
+Ручной режим использует выбранный poolId; MANUAL с poolId=null означает продолжить реально открытый активный набор. Автоматический режим сохраняет includePoolIds, excludePoolIds, minReward, допустимые modalities, includeTraining/includeExams. Обучения и экзамены по умолчанию исключены. Настройки копируются в запуск: изменения настроек не меняют действующий запуск.
 
-## Submission invariants
+Перед выбором каталог обновляется. Автовыбор исключает неизвестную оплату, несопоставимые единицы, недоступные проекты и запрещённые категории. Сортировка: указанная оплата за целый набор по убыванию, poolId стабильно при равенстве. Внутренние вопросы/пары не умножают оплату. Если сопоставимость не доказана, цена не сравнивается по догадке.
 
-- taskId is a stable platform identity, not a content hash. snapshotHash includes full instruction identity/hash and actual material bytes/options. Identical content in different tasks is valid.
-- Validate the whole submission unit; reject multi-question pages. Bind exact current elements, do not allow a locator to rebind an old approval to a new task after rerender.
-- Fresh read before confirm/submit; changed instruction/frame/origin/material/task invalidates old approval. Never silently truncate model context; do not allow runtime context shifting to discard instruction.
-- PostgreSQL transaction changes item to SUBMIT_INTENT and consumes nonce before dispatch. DB failure means no click. Duplicate HTTP confirm never creates another attempt.
-- Any uncertain result after intent becomes UNKNOWN; no automatic retry or restart, including a later run of the same unresolved task. User resolves it manually on Yandex and opens a different task.
-- Explicit success acknowledgement, verified end of task batch, or verified task identity advance after click is required; validation errors dominate. Submitted is not accepted/paid.
-- API startup reconciles active runs to INTERRUPTED or UNKNOWN, revokes worker automation before allowing new runs. At most one active run/user via DB constraint.
-- First inspected task is first run item; do not submit it twice when continuing. Stop cannot undo a dispatched answer. Late inference results or stale confirmations are ignored.
+Инструкция по возможности открывается до «Приступить». Эта кнопка резервирует набор и запускает таймер. Автовыбор может перейти к следующему кандидату после отказа подготовки только до резервирования. Уже активный или автоматически открытый Янгом следующий набор обрабатывается прежде нового выбора. Отсутствие кандидатов завершает запуск с причиной.
 
-## AI and persistence
+## Набор, ответы и формы
 
-- API builds model request itself from the worker snapshot and complete instruction blocks. POST /v1/chat/completions to private inference, input_audio plus images/text, schema-constrained Decision, strict response validation against current option IDs. No tools.
-- Model-visible option identifiers are request-local, unique ten-letter lowercase aliases. Labels and ordering stay intact; the API validates the returned alias and maps it back to the original snapshot option ID. Aliases never reach the public contract, worker submission or persistent history. This internal adaptation addresses the observed confusion between numeric-looking IDs and numeric answer labels; it does not prove model accuracy.
-- Disable inference prompt caching and saved idle-slot caches. Each request contains its own complete instructions/materials; serving memory is bounded without an additional multi-gigabyte cross-request cache.
-- One running request + at most four waiting; max one/user. Queue deadline120s, inference120s, platform task expiry takes precedence. Invalid JSON, timeout, model absence and quota exhaustion expose manual selection with aiError.
-- 100 analyses/user/day UTC; atomic reservation and idempotent request IDs, don't reserve again on retry. No indefinite retries.
-- Store users, browser assignments, runs, run_items and ai_usage plus instruction/media/model hashes. Active material bytes and full instruction bodies aren't persistent history.
-- Account provisioning CLI inside API artifact creates/disables a user, assigns a free worker. Password input through stdin/console, never args/logs. Five slots maximum.
+`TaskSet`: poolId, suiteId, упорядоченные parts, instruction, snapshotHash, expiresAt, adapterVersion. Часть содержит id/title/text, media, fields и unmappedControls. MediaAsset содержит worker ID, тип, MIME, длину, SHA256 и для аудио длительность. InstructionBundle содержит sourceKey, hash и упорядоченные блоки с устойчивыми id.
 
-## Verification and deliverables
+`TaskField`: id, label, kind (`SINGLE_CHOICE`, `MULTI_CHOICE`, `TEXT`, `NUMBER`), required, options, текущее value, stage, maxLength/min/max. Значение — строка, массив строк, число либо null. Идентификаторы поля принадлежат части.
 
-- Meaningful unit/integration/browser tests; keep 80% coverage checks honest. Real PostgreSQL integration, no skipped Docker tests portrayed as passed.
-- Test 50 unique confirmed sends, idempotent confirms, changed instructions, stale task rerenders, whole-task rejection, error/timeout after click, API/worker crashes, stop, login expiry, owner isolation and noVNC revocation.
-- Media tests: Range, cross-user access, bad audio, bounds, inaccessible instructions/examples, no silent clipping, instructions asking about speech vs background sound.
-- Model evaluation: labelled 25 text,25 image,25 speech,25 sound/prosody minimum; >=90% correct/category counting abstentions as unsolved. p95<=30s text/image,<=90s task audio<=60s excluding queue. Report real GPU/RAM usage and actual measured evidence; fixture/mock is not real model/site verification.
-- Historical investigation used Tasks image/search-query demos; this was superseded by the user's Yang correction. Those demos and their iframe domains do not define the Yang adapter. The actual Yang landing page and corporate sign-in were inspected; authenticated task/instruction boundaries still need verification. Final ready claim requires loaded, compatible Yang templates, never synthetic selectors labelled as live support.
-- Operations: start after Windows reboot, pinned image update, DB and stopped-profile backup/restore, explicit .107 preflight. Root coordinates final diff and requirement audit.
+`AnswerSet`: decision (`ANSWER`/`ABSTAIN`), answers `[{partId,fieldId,value}]`, reason. Нельзя использовать один optionId на весь набор. Ответ обязан ссылаться только на выданные идентификаторы; проверяются тип, диапазон, варианты, повторы и полнота.
 
-## Ownership
+У нестандартной группы модель может предложить только FieldGrouping с partId/fieldId/label/kind/controlIds. Worker проверяет наблюдаемые элементы, границы формы, непересечение и читаемое состояние. Ни JavaScript, ни произвольный селектор/адрес из модели не исполняются.
 
-Root: contracts, root manifests, apps/web, tests/e2e, integration and README.
-implement_api: apps/api only.
-implement_browser: apps/browser, tests/test-site, removal of replaced apps/desktop files only.
-implement_windows_ops: ops, compose files, Dockerfiles outside apps/api/browser/web, docs/operations.md and model packaging/evaluation scripts. Coordinate before changing another owner's files.
+После каждого этапа заполнения повторно читаются значения и появившиеся поля. У аспектов общий выбор идёт первым, затем шесть оценок каждой стороны, затем условные сравнения. Общий выбор не выводится усреднением оценок. Голосовой шаблон сохраняет все три вопроса каждой пары. Размер набора извлекается со страницы, не фиксируется числами5/3.
+
+Хеш содержимого включает идентичность, структуру, инструкцию и оригиналы материалов, но не выбранные значения. Изменение материалов/структуры аннулирует старые привязки и ответы; допускаются два повторных построения. Неполная/нестабильная форма, отказ модели, истёкший срок и недоступная инструкция не приводят к случайному ответу.
+
+## Единственная отправка и восстановление
+
+Платформенная единица — suiteId, а не порядковый номер пары. Перед внешней кнопкой отправки БД сохраняет `SUBMIT_INTENT`. Повторное считывание всех частей и ответов обязательно. Внешнее нажатие выполняется один раз; внутреннее переключение пары не считается отправкой.
+
+Положительный результат требует проверенного перехода на следующий suite/конец задания или признака принятия; ошибки формы имеют приоритет. Потерянное подтверждение после intent даёт `UNKNOWN` и остановку. Этот suite не отправляется повторно после другого HTTP запроса, нового запуска или рестарта. SUBMITTED означает подтверждённую отправку, не выплату или правильность.
+
+STOP запрещает следующие действия и игнорирует опоздавшие ответы модели; уже отправленное нельзя отменить. При старте API незавершённые запуски сверяются и становятся INTERRUPTED/UNKNOWN, автоматическое возобновление отсутствует. Уникальный индекс ограничивает один активный запуск на пользователя.
+
+V2 сохраняет прежние исторические ответы в legacy_response, переименовывает идентичность в pool_id/suite_id, добавляет answer_json, снимок настроек/проекта/прогресса и selection_settings. V1 не изменяется. Исполняемые endpoint confirm, confirmation nonce и прежний single-option путь удалены; legacy_response — только архив ранее сохранённых записей.
+
+## Инструкция и модель
+
+Worker получает полное содержимое, включая закрытые details и связанные исходные примеры; сохраняет хеши и IDs блоков. Организационные ссылки не становятся командами. Недоступный обязательный внешний файл блокирует проект.
+
+InstructionCompiler обрабатывает длинный источник порциями с учётом контекста. Для каждого раздела и примера фиксируются правила, ссылки на источник и результат обработки. Перед решением выбираются необходимые исходные разделы/примеры вместе с правилами. Пропуск блока, недоступный материал или невозможность уложиться в ограничение блокирует подготовку. Версия инструкции привязана к ответам; изменение сбрасывает подготовку. Акустические сравнения получают исходное аудио, не одну расшифровку.
+
+Контекст8192 токена, один выполняемый запрос, до4 ожидающих, тайм-аут запроса/ожидания120с. Каждый фактический вызов входит в суточную квоту100/пользователь/UTC, включая подготовку и выбор разделов; UI показывает расход подготовки. До чтения/base64 проверяются размеры порции. Рабочее аудио<=60с, суммарное аудио запроса<=120с; превышение отклоняется, не обрезается. Нормализация для inference не меняет оригиналы пользователя.
+
+Категории допуска: TEXT, IMAGE, SPEECH, SOUND_PROSODY. Аудио по умолчанию требует SOUND_PROSODY; SPEECH допустима только при подтверждённом инструкцией анализе речевого содержания. Gate-файл должен соответствовать SHA256 модели и содержать минимум25 независимо размеченных целых наборов, >=90% полностью правильных в категории. Отказы — нерешённые. Самооценка и принятие формы не являются разметкой.
+
+`ops/inference/quality-evidence.json` поставляется без допущенных категорий. Синтетические/детерминированные тесты не могут автоматически менять этот файл. `score_sets.py` проверяет целые ответы из записанного production-pipeline evaluation и создаёт отдельный отчёт/файл допуска; оператор отвечает за подлинность корпуса, независимую разметку и выполнение через реальный pipeline. Прямой диагностический вызов модели через evaluate.py измеряет модель, но не допускает рабочий pipeline.
+
+## HTTP API
+
+JSON camelCase; время ISO8601UTC; ошибки `{code,message}`. Владелец проверяется на каждом ресурсе, чужой объект не раскрывается.
+
+| Метод и путь | Смысл |
+|---|---|
+| GET /api/auth/csrf; POST /api/auth/login; POST /api/auth/logout | CSRF, вход приложения, выход |
+| GET /api/me | Пользователь и текущая дневная квота |
+| GET/POST /api/browser | Состояние / открыть постоянный серверный браузер |
+| POST/DELETE /api/browser/manual-control; WS /api/browser/view | Взять/освободить управление, авторизованный RFB |
+| GET /api/yang/session | Обновлённое состояние входа Янг |
+| GET /api/yang/catalogue; POST /api/yang/catalogue/refresh | Сохранённый каталог / обновить из браузера |
+| GET/PUT /api/yang/selection | Настройки следующего запуска |
+| POST /api/runs | `{requestId,maxTasks,selection}`; идемпотентный старт |
+| GET /api/runs; GET /api/runs/{id} | История / состояние набора и структурированные результаты |
+| POST /api/runs/{id}/resume; POST /api/runs/{id}/stop | Продолжить после проверки / остановить |
+| GET /api/runs/{id}/media/{assetId} | Оригинал, no-store, авторизация, одиночный Range |
+| GET /health/live; internal /health/ready | Жизнь процесса / раздельная готовность компонентов |
+
+RunSummary добавляет selection, selectedProject, selectionReason, instructionProgress. RunView содержит current TaskSet и results. Состояния: SELECTING, PREPARING, ANALYZING, FILLING, WAITING_FOR_AUTH, WAITING_FOR_USER, SUBMITTING, COMPLETED, STOPPED, INTERRUPTED, UNKNOWN, FAILED.
+
+Приватный worker принимает закреплённый bearer-секрет: GET /internal/status; POST /internal/commands; GET /internal/media/{id}; WS /internal/view. Команды OPEN/ENTER_MANUAL/EXIT_MANUAL/BEGIN/PAUSE/STOP/CLOSE, YANG_SESSION/CATALOGUE/INSTRUCTION/SELECT_PROJECT/SNAPSHOT/MAP_FIELDS/APPLY/SUBMIT. Для автоматики обязательны generation/runId. APPLY/SUBMIT содержат poolId/suiteId/snapshotHash/instructionHash/answers. Команды сериализуются; модель не выбирает worker или адрес сайта.
+
+## Проверка и выпуск
+
+Обязательны unit/HTTP/реальная PostgreSQL/Chromium, multipart/conditional/оба аудиошаблона, длинные инструкции и недоступные примеры, неверные поля и изменения материалов, STOP/UNKNOWN/no-retry, пять профилей/сессии/RFB HTTP, миграция и backup/restore. Реальный Янг и качество реальной модели проверяются отдельно от fixtures.
+
+Обновление `.107`: новые закреплённые API/browser images, резервная копия БД и профилей, новый Compose descriptor с сохранением секретов/профилей/PG/model, запуск FlywayV2, проверка HTTP/noVNC и рестарта. Возврат на V1 требует восстановления соответствующей БД в свежие volumes; одного старого API image недостаточно. Текущие результаты и оставшиеся ограничения фиксируются в verification.md.

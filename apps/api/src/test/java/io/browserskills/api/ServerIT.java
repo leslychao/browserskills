@@ -45,6 +45,9 @@ class ServerIT {
   @Autowired LoginRateLimiter limiter;
   @MockitoBean WorkerClient worker;
   @MockitoBean InferenceClient model;
+  @MockitoBean QualityGates gates;
+  private final AtomicBoolean applied = new AtomicBoolean();
+  private final AtomicReference<String> yangState = new AtomicReference<>("READY");
   private final AtomicInteger task = new AtomicInteger(1), clicks = new AtomicInteger();
   private final AtomicReference<String> instruction = new AtomicReference<>("a".repeat(64));
   private HttpClient client;
@@ -70,17 +73,30 @@ class ServerIT {
             anyString(),
             nullable(String.class),
             nullable(UUID.class),
-            nullable(Contracts.SubmitPayload.class),
+            nullable(Object.class),
             any()))
         .thenAnswer(
             call -> {
               String type = call.getArgument(1);
               return switch (type) {
+                case "YANG_SESSION" -> yang();
+                case "CATALOGUE" ->
+                    new Contracts.Catalogue(
+                        List.of(ProjectSelectionTest.item("pool", "15", "rub")),
+                        Instant.now(),
+                        "pool",
+                        "suite-" + task.get());
+                case "INSTRUCTION" -> snapshot().instruction();
                 case "SNAPSHOT" -> snapshot();
+                case "APPLY" -> {
+                  applied.set(true);
+                  yield snapshot();
+                }
                 case "SUBMIT" -> {
                   clicks.incrementAndGet();
                   task.incrementAndGet();
-                  yield new Contracts.SubmitResult("SUBMITTED", "task-" + task.get(), null);
+                  applied.set(false);
+                  yield new Contracts.SubmitResult("SUBMITTED", "suite-" + task.get(), null);
                 }
                 case "BEGIN" -> status("AUTOMATION");
                 case "ENTER_MANUAL" -> status("MANUAL");
@@ -88,27 +104,60 @@ class ServerIT {
                 default -> status("IDLE");
               };
             });
-    when(model.analyze(any(), any())).thenReturn(new Contracts.Decision("ANSWER", "a"));
+    when(model.interpret(any(), any(), any(), any()))
+        .thenAnswer(
+            c ->
+                new InstructionCompiler.Interpretation(
+                    ((Contracts.InstructionBlock) c.getArgument(1)).id(),
+                    "Choose the correct answer",
+                    true,
+                    false));
+    when(model.sources(any(), any(), any(), any()))
+        .thenReturn(new InferenceClient.SourceSelection(List.of("rule")));
+    when(model.answer(any(), any(), any(), any(), any(), any()))
+        .thenReturn(SnapshotValidationTest.answer());
+    yangState.set("READY");
+    applied.set(false);
+    when(gates.allowed(anyString())).thenReturn(true);
   }
 
   private Contracts.BrowserStatus status(String mode) {
     return new Contracts.BrowserStatus(
-        "browser-1", "generation", mode, "https://tasks.yandex.ru/task", "run");
+        "browser-1",
+        "generation",
+        mode,
+        "https://yang.yandex-team.ru/task/pool/suite",
+        null,
+        yang());
   }
 
-  private Contracts.TaskSnapshot snapshot() {
-    var s = SnapshotValidationTest.snapshot("task-" + task.get());
-    return new Contracts.TaskSnapshot(
-        s.projectId(),
-        s.taskId(),
-        s.question(),
-        new Contracts.InstructionBundle("rules", instruction.get(), s.instruction().blocks()),
+  private Contracts.TaskSet snapshot() {
+    var s = SnapshotValidationTest.snapshot("suite-" + task.get());
+    if (!applied.get()) return s;
+    var p = s.parts().getFirst();
+    var f = p.fields().getFirst();
+    var field =
+        new Contracts.TaskField(
+            f.id(),
+            f.label(),
+            f.kind(),
+            f.required(),
+            f.options(),
+            "a",
+            f.stage(),
+            f.maxLength(),
+            f.min(),
+            f.max());
+    return new Contracts.TaskSet(
+        s.poolId(),
+        s.suiteId(),
+        List.of(
+            new Contracts.TaskPart(
+                p.id(), p.title(), p.text(), p.media(), List.of(field), List.of())),
+        s.instruction(),
+        s.snapshotHash(),
         null,
-        null,
-        s.options(),
-        SnapshotValidation.sha256((s.taskId() + instruction.get()).getBytes()),
-        null,
-        "v1");
+        s.adapterVersion());
   }
 
   private URI uri(String path) {
@@ -153,22 +202,6 @@ class ServerIT {
       Thread.sleep(30);
     }
     throw new AssertionError("run did not reach " + state);
-  }
-
-  private Map<String, Object> confirm(JsonNode current, UUID request) {
-    return Map.of(
-        "requestId",
-        request,
-        "taskId",
-        current.path("taskId").asString(),
-        "snapshotHash",
-        current.path("snapshotHash").asString(),
-        "instructionHash",
-        current.path("instruction").path("hash").asString(),
-        "optionId",
-        "a",
-        "confirmationNonce",
-        current.path("confirmationNonce").asString());
   }
 
   @Test
@@ -283,79 +316,298 @@ class ServerIT {
     assertEquals(401, request("GET", "/api/me", null).statusCode());
   }
 
+  private Contracts.YangSession yang() {
+    return new Contracts.YangSession(
+        yangState.get(), Instant.now(), null, "pool", "suite-" + task.get());
+  }
+
   @Test
-  void confirmedRunUsesFirstTaskOnceAndDuplicateConfirmDoesNotSendAgain() throws Exception {
+  void autonomousRunSendsWholeSuitesAndRemovedConfirmEndpointCannotSend() throws Exception {
     login();
-    UUID requestId = UUID.randomUUID();
-    var started = request("POST", "/api/runs", new Contracts.StartRun(requestId, 3));
+    var request = SnapshotValidationTest.start(3);
+    var started = request("POST", "/api/runs", request);
     assertEquals(200, started.statusCode(), started.body());
-    UUID id = UUID.fromString(json(started).path("id").asString());
-    assertEquals(
-        id.toString(),
-        json(request("POST", "/api/runs", new Contracts.StartRun(requestId, 3)))
-            .path("id")
-            .asString());
-    for (int n = 1; n <= 3; n++) {
-      var current = await(id, "AWAITING_CONFIRMATION").path("current");
-      assertEquals("task-" + n, current.path("taskId").asString());
-      var confirmation = confirm(current, UUID.randomUUID());
-      assertEquals(200, request("POST", "/api/runs/" + id + "/confirm", confirmation).statusCode());
-      assertEquals(200, request("POST", "/api/runs/" + id + "/confirm", confirmation).statusCode());
-    }
-    var done = await(id, "COMPLETED");
+    UUID run = UUID.fromString(json(started).path("id").asString());
+    var completed = await(run, "COMPLETED");
+    assertEquals(3, completed.path("processed").asInt());
     assertEquals(3, clicks.get());
-    assertEquals(3, done.path("processed").asInt());
-    assertTrue(done.path("current").isNull());
-    assertEquals(1, json(request("GET", "/api/runs", null)).size());
+    assertEquals(run.toString(), json(request("POST", "/api/runs", request)).path("id").asString());
+    assertEquals(3, clicks.get());
+    assertEquals(404, request("POST", "/api/runs/" + run + "/confirm", Map.of()).statusCode());
+    assertEquals(3, clicks.get());
   }
 
   @Test
-  void changedInstructionsInvalidateConfirmationAndStopIsFinal() throws Exception {
+  void twoFactorPauseAndResumeRetainOneActiveRun() throws Exception {
     login();
-    UUID id =
-        UUID.fromString(
-            json(request("POST", "/api/runs", new Contracts.StartRun(UUID.randomUUID(), 3)))
-                .path("id")
-                .asString());
-    var current = await(id, "AWAITING_CONFIRMATION").path("current");
-    instruction.set("c".repeat(64));
-    var stale =
-        request("POST", "/api/runs/" + id + "/confirm", confirm(current, UUID.randomUUID()));
-    assertEquals(409, stale.statusCode(), stale.body());
+    yangState.set("TWO_FACTOR_REQUIRED");
+    var started = request("POST", "/api/runs", SnapshotValidationTest.start(1));
+    UUID run = UUID.fromString(json(started).path("id").asString());
+    await(run, "WAITING_FOR_AUTH");
     assertEquals(0, clicks.get());
-    var refreshed = await(id, "AWAITING_CONFIRMATION");
-    assertEquals(
-        "c".repeat(64), refreshed.path("current").path("instruction").path("hash").asString());
-    assertEquals(
-        "STOPPED",
-        json(request("POST", "/api/runs/" + id + "/stop", null)).path("status").asString());
-    assertEquals(
-        409,
-        request(
-                "POST",
-                "/api/runs/" + id + "/confirm",
-                confirm(refreshed.path("current"), UUID.randomUUID()))
-            .statusCode());
+    assertEquals(200, request("POST", "/api/browser/manual-control", null).statusCode());
+    assertEquals(409, request("POST", "/api/runs", SnapshotValidationTest.start(1)).statusCode());
+    assertEquals(409, request("POST", "/api/runs/" + run + "/resume", null).statusCode());
+    yangState.set("READY");
+    assertEquals(200, request("POST", "/api/runs/" + run + "/resume", null).statusCode());
+    await(run, "COMPLETED");
+    assertEquals(1, clicks.get());
   }
 
   @Test
-  void unavailableModelAllowsManualReviewAndForeignMediaIsHidden() throws Exception {
-    when(model.analyze(any(), any()))
-        .thenThrow(new ApiException(503, "MODEL_UNAVAILABLE", "Unavailable"));
+  void selectionAndCatalogueAreOwnedAndUnverifiedQualityNeverSubmits() throws Exception {
     login();
-    UUID id =
+    assertEquals(200, request("GET", "/api/yang/session", null).statusCode());
+    assertEquals(200, request("POST", "/api/yang/catalogue/refresh", null).statusCode());
+    assertEquals(
+        200,
+        request("PUT", "/api/yang/selection", Contracts.SelectionSettings.defaults()).statusCode());
+    assertEquals(
+        "MANUAL", json(request("GET", "/api/yang/selection", null)).path("mode").asString());
+    doThrow(new ApiException(409, "QUALITY_NOT_VERIFIED", "Quality gate blocked"))
+        .when(gates)
+        .require(any());
+    UUID run =
         UUID.fromString(
-            json(request("POST", "/api/runs", new Contracts.StartRun(UUID.randomUUID(), 1)))
+            json(request("POST", "/api/runs", SnapshotValidationTest.start(1)))
                 .path("id")
                 .asString());
-    var current = await(id, "AWAITING_CONFIRMATION").path("current");
-    assertEquals("MODEL_UNAVAILABLE", current.path("aiError").path("code").asString());
-    assertTrue(current.path("proposal").isNull());
+    var failed = await(run, "WAITING_FOR_USER");
+    assertEquals("QUALITY_NOT_VERIFIED", failed.path("error").path("code").asString());
+    assertEquals(0, clicks.get());
     UUID foreign = store.provision("bob", "hash");
-    UUID otherRun = store.create(foreign, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
-    assertEquals(404, request("GET", "/api/runs/" + otherRun, null).statusCode());
-    assertEquals(404, request("GET", "/api/runs/" + otherRun + "/media/secret", null).statusCode());
-    assertEquals(404, request("GET", "/api/runs/" + id + "/media/missing", null).statusCode());
-    request("POST", "/api/runs/" + id + "/stop", null);
+    UUID foreignRun = store.create(foreign, SnapshotValidationTest.start(1)).run().id();
+    assertEquals(404, request("GET", "/api/runs/" + foreignRun, null).statusCode());
+    assertEquals(404, request("GET", "/api/runs/" + foreignRun + "/media/x", null).statusCode());
+    store.stop(foreign, foreignRun);
+  }
+
+  @Test
+  void failedInstructionBeforeReservationSkipsToNextAutoCandidate() throws Exception {
+    login();
+    var catalogue =
+        new Contracts.Catalogue(
+            List.of(
+                ProjectSelectionTest.item("high", "20", "rub"),
+                ProjectSelectionTest.item("pool", "15", "rub")),
+            Instant.now(),
+            null,
+            null);
+    when(worker.command(
+            anyInt(),
+            eq("CATALOGUE"),
+            anyString(),
+            any(UUID.class),
+            any(),
+            eq(Contracts.Catalogue.class)))
+        .thenReturn(catalogue);
+    when(worker.command(
+            anyInt(),
+            eq("INSTRUCTION"),
+            anyString(),
+            any(UUID.class),
+            eq(Map.of("poolId", "high")),
+            eq(Contracts.InstructionBundle.class)))
+        .thenThrow(new ApiException(422, "INSTRUCTION_UNAVAILABLE", "Unavailable"));
+    var selection =
+        new Contracts.SelectionSettings(
+            "AUTO", null, List.of(), List.of(), null, List.of("text"), false, false);
+    UUID run =
+        UUID.fromString(
+            json(request(
+                    "POST", "/api/runs", new Contracts.StartRun(UUID.randomUUID(), 1, selection)))
+                .path("id")
+                .asString());
+    assertEquals(1, await(run, "COMPLETED").path("processed").asInt());
+    assertEquals(1, clicks.get());
+    verify(worker, never())
+        .command(
+            anyInt(),
+            eq("SELECT_PROJECT"),
+            anyString(),
+            any(UUID.class),
+            eq(Map.of("poolId", "high")),
+            any());
+    verify(worker)
+        .command(
+            anyInt(),
+            eq("SELECT_PROJECT"),
+            anyString(),
+            any(UUID.class),
+            eq(Map.of("poolId", "pool")),
+            any());
+    UUID second =
+        UUID.fromString(
+            json(request(
+                    "POST", "/api/runs", new Contracts.StartRun(UUID.randomUUID(), 1, selection)))
+                .path("id")
+                .asString());
+    assertEquals(1, await(second, "COMPLETED").path("processed").asInt());
+    verify(worker, times(2))
+        .command(
+            anyInt(),
+            eq("INSTRUCTION"),
+            anyString(),
+            any(UUID.class),
+            eq(Map.of("poolId", "high")),
+            eq(Contracts.InstructionBundle.class));
+    when(worker.command(
+            anyInt(), eq("CATALOGUE"), isNull(), isNull(), any(), eq(Contracts.Catalogue.class)))
+        .thenReturn(catalogue);
+    var refreshed = json(request("POST", "/api/yang/catalogue/refresh", null));
+    assertEquals("UNPREPARED", refreshed.path("items").get(0).path("preparation").asString());
+  }
+
+  @Test
+  void knownQualityFailureBlocksCatalogueBeforeAnyInstructionCall() throws Exception {
+    login();
+    when(gates.allowed(anyString())).thenReturn(false);
+    var catalogue =
+        new Contracts.Catalogue(
+            List.of(ProjectSelectionTest.item("pool", "15", "rub")), Instant.now(), null, null);
+    when(worker.command(
+            anyInt(),
+            eq("CATALOGUE"),
+            nullable(String.class),
+            nullable(UUID.class),
+            any(),
+            eq(Contracts.Catalogue.class)))
+        .thenReturn(catalogue);
+    var listing = json(request("POST", "/api/yang/catalogue/refresh", null));
+    assertEquals("BLOCKED", listing.path("items").get(0).path("preparation").asString());
+    var selection =
+        new Contracts.SelectionSettings(
+            "MANUAL", "pool", List.of(), List.of(), null, List.of("text"), false, false);
+    UUID run =
+        UUID.fromString(
+            json(request(
+                    "POST", "/api/runs", new Contracts.StartRun(UUID.randomUUID(), 1, selection)))
+                .path("id")
+                .asString());
+    await(run, "WAITING_FOR_USER");
+    verifyNoInteractions(model);
+    assertEquals(0, store.quota(user).used());
+    assertEquals(0, clicks.get());
+    request("POST", "/api/runs/" + run + "/stop", null);
+  }
+
+  @Test
+  void lostSubmitResponseIsUnknownAndTheSameSuiteCannotBeSentInAnotherRun() throws Exception {
+    login();
+    when(worker.command(
+            anyInt(),
+            eq("SUBMIT"),
+            anyString(),
+            any(UUID.class),
+            any(),
+            eq(Contracts.SubmitResult.class)))
+        .thenThrow(new ApiException(503, "WORKER_UNAVAILABLE", "Lost acknowledgement"));
+    UUID run =
+        UUID.fromString(
+            json(request("POST", "/api/runs", SnapshotValidationTest.start(1)))
+                .path("id")
+                .asString());
+    await(run, "UNKNOWN");
+    UUID again =
+        UUID.fromString(
+            json(request("POST", "/api/runs", SnapshotValidationTest.start(1)))
+                .path("id")
+                .asString());
+    var failed = await(again, "FAILED");
+    assertEquals("UNRESOLVED_TASK", failed.path("error").path("code").asString());
+    verify(worker, times(1))
+        .command(
+            anyInt(),
+            eq("SUBMIT"),
+            anyString(),
+            any(UUID.class),
+            any(),
+            eq(Contracts.SubmitResult.class));
+  }
+
+  @Test
+  void knownFaceIdentityProjectIsBlockedEvenWithPassingImageCapability() throws Exception {
+    login();
+    when(gates.allowed(anyString())).thenReturn(true);
+    var identity =
+        new Contracts.CatalogueItem(
+            "94777297",
+            "Identity comparison",
+            new Contracts.Reward("30", "rub"),
+            "AVAILABLE",
+            "WORK",
+            List.of("image"),
+            "UNPREPARED",
+            null);
+    var catalogue = new Contracts.Catalogue(List.of(identity), Instant.now(), null, null);
+    when(worker.command(
+            anyInt(),
+            eq("CATALOGUE"),
+            nullable(String.class),
+            nullable(UUID.class),
+            any(),
+            eq(Contracts.Catalogue.class)))
+        .thenReturn(catalogue);
+    var result = json(request("POST", "/api/yang/catalogue/refresh", null));
+    assertEquals("BLOCKED", result.path("items").get(0).path("preparation").asString());
+    assertEquals(
+        "UNSUPPORTED_IDENTITY_TASK",
+        result.path("items").get(0).path("reason").path("code").asString());
+    verifyNoInteractions(model);
+  }
+
+  @Test
+  void expiredReservedSuiteAfterTwoFactorConsumesNoModelCalls() throws Exception {
+    login();
+    yangState.set("TWO_FACTOR_REQUIRED");
+    UUID run =
+        UUID.fromString(
+            json(request("POST", "/api/runs", SnapshotValidationTest.start(1)))
+                .path("id")
+                .asString());
+    await(run, "WAITING_FOR_AUTH");
+    var s = SnapshotValidationTest.snapshot("expired");
+    var expired =
+        new Contracts.TaskSet(
+            s.poolId(),
+            s.suiteId(),
+            s.parts(),
+            s.instruction(),
+            s.snapshotHash(),
+            Instant.now().minusSeconds(30),
+            s.adapterVersion());
+    var catalogue =
+        new Contracts.Catalogue(
+            List.of(ProjectSelectionTest.item("pool", "15", "rub")), Instant.now(), "pool", null);
+    when(worker.command(
+            anyInt(),
+            eq("CATALOGUE"),
+            anyString(),
+            any(UUID.class),
+            any(),
+            eq(Contracts.Catalogue.class)))
+        .thenReturn(catalogue);
+    when(worker.command(
+            anyInt(),
+            eq("SNAPSHOT"),
+            anyString(),
+            any(UUID.class),
+            isNull(),
+            eq(Contracts.TaskSet.class)))
+        .thenReturn(expired);
+    yangState.set("READY");
+    assertEquals(200, request("POST", "/api/runs/" + run + "/resume", null).statusCode());
+    assertEquals("TASK_EXPIRED", await(run, "FAILED").path("error").path("code").asString());
+    verifyNoInteractions(model);
+    assertEquals(0, store.quota(user).used());
+    assertEquals(0, clicks.get());
+    verify(worker)
+        .command(
+            anyInt(),
+            eq("SELECT_PROJECT"),
+            anyString(),
+            any(UUID.class),
+            eq(Map.of("poolId", "pool")),
+            eq(Contracts.BrowserStatus.class));
   }
 }

@@ -9,22 +9,22 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { BrowserOwner } from '../src/owner.js';
 import { createWorkerServer } from '../src/server.js';
-import { startTestSite, type FixtureMode } from '../../../tests/test-site/server.js';
-import { fixtureProfile } from './fixture-profile.js';
-import type { BrowserStatus, TaskSnapshot, WorkerCommand } from '@browserskills/contracts';
+import { startYangFixture, type YangFixtureMode } from './yang-fixture.js';
+import type { BrowserStatus, TaskSet, WorkerCommand } from '@browserskills/contracts';
 
 const cleanup:Array<()=>Promise<unknown>>=[];
 afterEach(async()=>{for(const fn of cleanup.splice(0).reverse())await fn();});
 const token='worker-test-secret-with-more-than-thirty-two-characters';
-async function setup(mode:FixtureMode='normal'){
-  const site=await startTestSite(mode);cleanup.push(site.close);
+async function setup(mode:YangFixtureMode='normal'){
+  const site=await startYangFixture(mode);cleanup.push(site.close);
   const directory=await mkdtemp(join(tmpdir(),'browserskills-worker-'));cleanup.push(()=>rm(directory,{recursive:true,force:true,maxRetries:20,retryDelay:100}));
-  const owner=new BrowserOwner({workerId:'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media'),headless:true,startUrl:site.url,profiles:[fixtureProfile(site.url)],verificationTimeoutMs:250});
+  const owner=new BrowserOwner({workerId:'browser-1',profileDir:join(directory,'profile'),mediaDir:join(directory,'media'),headless:true,startUrl:`${site.url}/task/${site.pool}/suite-1`,adapterOptions:{origin:site.url,frameOrigin:site.url,mediaOrigins:[site.url],instructionOrigins:[site.url]},verificationTimeoutMs:250});
   const input:Buffer[]=[];const tcp=createTcpServer(socket=>{socket.write('RFB 003.008\n');socket.on('data',data=>{input.push(data);socket.write(data);});});
   tcp.listen(0,'127.0.0.1');await once(tcp,'listening');cleanup.push(()=>new Promise<void>(resolve=>tcp.close(()=>resolve())));
   const app=createWorkerServer(owner,token,(tcp.address() as import('node:net').AddressInfo).port);app.server.listen(0,'127.0.0.1');await once(app.server,'listening');cleanup.push(app.close);
   const url=`http://127.0.0.1:${(app.server.address() as import('node:net').AddressInfo).port}`;
-  const command=async(command:Omit<WorkerCommand,'id'>&{id?:string})=>fetch(`${url}/internal/commands`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({id:randomUUID(),...command})});
+  type Input=WorkerCommand extends infer C?C extends WorkerCommand?Omit<C,'id'>&{id?:string}:never:never;
+  const command=async(command:Input)=>fetch(`${url}/internal/commands`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({id:randomUUID(),...command})});
   return {owner,app,url,command,input,site};
 }
 
@@ -69,8 +69,8 @@ describe('worker HTTP, generation and manual control',()=>{
     expect((await command({type:'ENTER_MANUAL'})).status).toBe(409);
     expect((await command({type:'SNAPSHOT',generation:first.generation!,runId:randomUUID()})).status).toBe(409);
     const snapshotCommand={type:'SNAPSHOT' as const,id:randomUUID(),generation:first.generation!,runId};
-    const snapshot=await(await command(snapshotCommand)).json() as TaskSnapshot;
-    expect(snapshot.taskId).toBe('task-1');
+    const snapshot=await(await command(snapshotCommand)).json() as TaskSet;
+    expect(snapshot.suiteId).toBe('suite-1');
     const stop=await(await command({type:'STOP',generation:first.generation!,runId})).json() as BrowserStatus;
     expect(stop.mode).toBe('CLOSED');expect(stop.generation).not.toBe(first.generation);
     expect(await(await command(snapshotCommand)).json()).toMatchObject({code:'COMMAND_EXPIRED'});
@@ -93,24 +93,31 @@ describe('worker HTTP, generation and manual control',()=>{
     const socket=new WebSocket(url.replace('http:','ws:')+'/internal/view',{headers:{Authorization:`Bearer ${token}`}});await once(socket,'open');const closed=once(socket,'close');socket.send('text is not RFB');await closed;
     const released=await(await command({type:'EXIT_MANUAL'})).json() as BrowserStatus;expect(released.mode).toBe('IDLE');
   });
-  it('stop cancels a bound submit waiting for visibility and rejects queued work',async()=>{
-    const {command,site}=await setup('delayed-submit');const status=await(await command({type:'OPEN'})).json() as BrowserStatus;
+  it('pause releases automation for user login and resumes in the same persistent browser',async()=>{
+    const {command,site}=await setup();const status=await(await command({type:'OPEN'})).json() as BrowserStatus;
     const runId=randomUUID();const generation=status.generation!;await command({type:'BEGIN',generation,runId});
-    const snapshot=await(await command({type:'SNAPSHOT',generation,runId})).json() as TaskSnapshot;
-    const selected=once(site.events,'selected');
-    const pending=command({type:'SUBMIT',generation,runId,payload:{taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id}});
-    await selected;const queued=command({type:'SNAPSHOT',generation,runId});
-    await command({type:'STOP',generation,runId});await pending;
-    expect((await queued).status).toBe(409);expect(site.state.submissions).toHaveLength(0);
+    expect(await(await command({type:'PAUSE',generation,runId})).json()).toMatchObject({mode:'IDLE',generation});
+    expect((await command({type:'ENTER_MANUAL',generation})).status).toBe(200);
+    expect((await command({type:'BEGIN',generation,runId})).status).toBe(200);
+    expect(site.state.submissions).toHaveLength(0);
   });
   it('serves bounded original bytes with Range and makes cleared IDs inaccessible',async()=>{
     const {owner,url}=await setup();const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aC1sAAAAASUVORK5CYII=','base64');
     const asset=await owner.media.put(bytes,'image');const headers={Authorization:`Bearer ${token}`};
+    expect(Buffer.from(await(await fetch(`${url}/internal/media/${asset.id}`,{headers})).arrayBuffer())).toEqual(bytes);
     const partial=await fetch(`${url}/internal/media/${asset.id}`,{headers:{...headers,Range:'bytes=0-9'}});
     expect(partial.status).toBe(206);expect(partial.headers.get('content-range')).toBe(`bytes 0-9/${bytes.length}`);
     expect(Buffer.from(await partial.arrayBuffer())).toEqual(bytes.subarray(0,10));
     expect((await fetch(`${url}/internal/media/${asset.id}`,{headers:{...headers,Range:'bytes=1000-1001'}})).status).toBe(416);
     expect((await fetch(`${url}/internal/media/../../private`,{headers})).status).toBe(404);
     await owner.media.clear();expect((await fetch(`${url}/internal/media/${asset.id}`,{headers})).status).toBe(404);
+  });
+  it('dispatches the complete autonomous mapping workflow through the authenticated worker API',async()=>{
+    const {command,url}=await setup('opaque');expect((await command({type:'YANG_SESSION'})).status).toBe(409);expect((await command({type:'CATALOGUE',payload:{refresh:false}})).status).toBe(409);
+    const status=await(await command({type:'OPEN'})).json() as BrowserStatus;expect((await fetch(`${url}/internal/status`,{headers:{Authorization:`Bearer ${token}`}})).status).toBe(200);expect(await(await command({type:'YANG_SESSION'})).json()).toMatchObject({state:'READY'});
+    const generation=status.generation!,runId=randomUUID();await command({type:'BEGIN',generation,runId});expect((await command({type:'CATALOGUE',payload:{refresh:true}})).status).toBe(200);expect((await command({type:'INSTRUCTION',generation,runId,payload:{poolId:'123'}})).status).toBe(200);expect(await(await command({type:'SELECT_PROJECT',generation,runId,payload:{poolId:'123'}})).json()).toMatchObject({workerId:'browser-1',generation,mode:'AUTOMATION',runId,yang:{state:'READY',poolId:'123',suiteId:'suite-1'}});
+    let task=await(await command({type:'SNAPSHOT',generation,runId})).json() as TaskSet;task=await(await command({type:'MAP_FIELDS',generation,runId,payload:{suiteId:task.suiteId,snapshotHash:task.snapshotHash,groups:[{partId:'part-1',fieldId:'choice',label:'Preference',kind:'SINGLE_CHOICE',controlIds:task.parts[0]!.unmappedControls.map(c=>c.id)}]}})).json() as TaskSet;
+    const answers=[{partId:'part-1',fieldId:'choice',value:task.parts[0]!.fields[0]!.options[0]!.id}];task=await(await command({type:'APPLY',generation,runId,payload:{poolId:task.poolId,suiteId:task.suiteId,snapshotHash:task.snapshotHash,instructionHash:task.instruction.hash,answers}})).json() as TaskSet;
+    expect(await(await command({type:'SUBMIT',generation,runId,payload:{poolId:task.poolId,suiteId:task.suiteId,snapshotHash:task.snapshotHash,instructionHash:task.instruction.hash,answers}})).json()).toMatchObject({outcome:'SUBMITTED'});
   });
 });

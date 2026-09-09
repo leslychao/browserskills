@@ -62,166 +62,6 @@ class PrivateClientsTest {
     reply.set(value.getBytes(StandardCharsets.UTF_8));
   }
 
-  private List<Contracts.Option> sentOptions(String body) {
-    var content = Json.mapper().readTree(body).path("messages").get(1).path("content");
-    String block = content.get(content.size() - 1).path("text").asString();
-    return Arrays.asList(
-        Json.mapper()
-            .readValue(block.substring("AVAILABLE OPTIONS:\n".length()), Contracts.Option[].class));
-  }
-
-  private String answer(String option) {
-    return Json.mapper()
-        .writeValueAsString(
-            Map.of(
-                "choices",
-                List.of(
-                    Map.of(
-                        "finish_reason",
-                        "stop",
-                        "message",
-                        Map.of(
-                            "content",
-                            Json.mapper()
-                                .writeValueAsString(new Contracts.Decision("ANSWER", option)))))));
-  }
-
-  @Test
-  void opaqueAliasesMapToOriginalIdsAndRejectOriginalOrUnknownReplies() {
-    var options =
-        List.of(
-            new Contracts.Option("o0", "1"),
-            new Contracts.Option("o1", "2"),
-            new Contracts.Option("o2", "5"));
-    var s = SnapshotValidationTest.snapshot("numeric-looking-options");
-    var snapshot =
-        new Contracts.TaskSnapshot(
-            s.projectId(),
-            s.taskId(),
-            s.question(),
-            s.instruction(),
-            s.image(),
-            s.audio(),
-            options,
-            s.snapshotHash(),
-            s.expiresAt(),
-            s.adapterVersion());
-    var current = new Materials.Current(UUID.randomUUID(), snapshot, "nonce", Map.of(), null, null);
-    var model = new InferenceClient(Json.mapper(), mock(AudioNormalizer.class), base);
-    responseFunction.set(body -> answer(sentOptions(body).get(2).id()));
-    assertEquals(
-        new Contracts.Decision("ANSWER", "o2"), model.analyze(current, Duration.ofSeconds(2)));
-    var aliases = sentOptions(requestBody.get());
-    assertEquals(List.of("1", "2", "5"), aliases.stream().map(Contracts.Option::label).toList());
-    assertEquals(3, aliases.stream().map(Contracts.Option::id).distinct().count());
-    assertTrue(aliases.stream().allMatch(o -> o.id().matches("[a-z]{10}")));
-    assertEquals(
-        aliases.stream().map(Contracts.Option::id).toList(),
-        Json.mapper()
-            .convertValue(
-                Json.mapper()
-                    .readTree(requestBody.get())
-                    .path("response_format")
-                    .path("json_schema")
-                    .path("schema")
-                    .path("oneOf")
-                    .get(0)
-                    .path("properties")
-                    .path("optionId")
-                    .path("enum"),
-                List.class));
-    assertEquals(options, current.snapshot().options());
-    reply(answer("o2"));
-    assertEquals(
-        "INVALID_MODEL_RESPONSE",
-        assertThrows(ApiException.class, () -> model.analyze(current, Duration.ofSeconds(2)))
-            .code());
-    reply(answer("unknownalias"));
-    assertEquals(
-        "INVALID_MODEL_RESPONSE",
-        assertThrows(ApiException.class, () -> model.analyze(current, Duration.ofSeconds(2)))
-            .code());
-    reply(
-        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"{\\\"decision\\\":\\\"ABSTAIN\\\"}\"}}]}");
-    assertEquals(
-        new Contracts.Decision("ABSTAIN", null), model.analyze(current, Duration.ofSeconds(2)));
-  }
-
-  @Test
-  void concurrentAnalysesKeepMappingsLocalAndCannotReuseAnotherCallsAlias() throws Exception {
-    var model = new InferenceClient(Json.mapper(), mock(AudioNormalizer.class), base);
-    var received = new ConcurrentHashMap<String, List<Contracts.Option>>();
-    var both = new CountDownLatch(2);
-    var crossed = new java.util.concurrent.atomic.AtomicBoolean();
-    responseFunction.set(
-        body -> {
-          String question =
-              Json.mapper()
-                  .readTree(body)
-                  .path("messages")
-                  .get(1)
-                  .path("content")
-                  .get(2)
-                  .path("text")
-                  .asString();
-          received.put(question, sentOptions(body));
-          both.countDown();
-          try {
-            if (!both.await(2, TimeUnit.SECONDS))
-              throw new IllegalStateException("Parallel request missing");
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-          }
-          var options =
-              crossed.get()
-                  ? received.entrySet().stream()
-                      .filter(e -> !e.getKey().equals(question))
-                      .findFirst()
-                      .orElseThrow()
-                      .getValue()
-                  : received.get(question);
-          return answer(options.get(0).id());
-        });
-    var first = numericTask("first", "17");
-    var second = numericTask("second", "42");
-    try (var pool = Executors.newFixedThreadPool(2)) {
-      var a = pool.submit(() -> model.analyze(first, Duration.ofSeconds(5)));
-      var b = pool.submit(() -> model.analyze(second, Duration.ofSeconds(5)));
-      assertEquals("17", a.get(6, TimeUnit.SECONDS).optionId());
-      assertEquals("42", b.get(6, TimeUnit.SECONDS).optionId());
-      assertEquals(
-          4,
-          received.values().stream()
-              .flatMap(List::stream)
-              .map(Contracts.Option::id)
-              .distinct()
-              .count());
-      crossed.set(true);
-      assertEquals(
-          "INVALID_MODEL_RESPONSE",
-          assertThrows(ApiException.class, () -> model.analyze(first, Duration.ofSeconds(5)))
-              .code());
-    }
-  }
-
-  private Materials.Current numericTask(String name, String id) {
-    var s = SnapshotValidationTest.snapshot(name);
-    var snapshot =
-        new Contracts.TaskSnapshot(
-            s.projectId(),
-            s.taskId(),
-            name,
-            s.instruction(),
-            s.image(),
-            s.audio(),
-            List.of(new Contracts.Option(id, "1"), new Contracts.Option(id + "0", "2")),
-            s.snapshotHash(),
-            s.expiresAt(),
-            s.adapterVersion());
-    return new Materials.Current(UUID.randomUUID(), snapshot, "nonce", Map.of(), null, null);
-  }
-
   @Test
   void privateWorkerRequiresTokenAndValidatesOriginalBytes() {
     var env =
@@ -269,71 +109,91 @@ class PrivateClientsTest {
                 HttpRequest.newBuilder(URI.create(base)).build(), 128, Duration.ofSeconds(2)));
   }
 
-  @Test
-  void modelReceivesEveryInstructionAndOriginalSoundRepresentation() throws Exception {
-    var normalizer = mock(AudioNormalizer.class);
-    when(normalizer.wav(any(), anyLong(), any())).thenReturn(new byte[] {1, 2, 3});
-    var model = new InferenceClient(Json.mapper(), normalizer, base);
-    byte[] raw = new byte[] {9, 8};
-    var audio =
-        new Contracts.MediaAsset(
-            "clip", "audio", "audio/mpeg", raw.length, SnapshotValidation.sha256(raw), 1000L);
-    var image =
-        new Contracts.MediaAsset(
-            "example", "image", "image/png", raw.length, SnapshotValidation.sha256(raw), null);
-    var basic = SnapshotValidationTest.snapshot("audio-task");
-    var s =
-        new Contracts.TaskSnapshot(
-            "project",
-            "audio-task",
-            "Identify background sound and emotional prosody",
-            new Contracts.InstructionBundle(
-                "rules",
-                "a".repeat(64),
+  private String envelope(Object value) {
+    return Json.mapper()
+        .writeValueAsString(
+            Map.of(
+                "choices",
                 List.of(
-                    new Contracts.InstructionBlock(
-                        "text", "Full rules. Speech alone is insufficient.", null, null),
-                    new Contracts.InstructionBlock("image", null, image, "Reference image"),
-                    new Contracts.InstructionBlock(
-                        "audio", null, audio, "Instruction sound example"))),
-            null,
-            audio,
-            basic.options(),
-            "b".repeat(64),
-            null,
-            "v1");
-    var current =
-        new Materials.Current(
-            UUID.randomUUID(), s, "nonce", Map.of("clip", raw, "example", raw), null, null);
-    responseFunction.set(body -> answer(sentOptions(body).get(0).id()));
-    assertEquals("a", model.analyze(current, Duration.ofSeconds(2)).optionId());
-    String sent = requestBody.get();
-    assertEquals(false, Json.mapper().readTree(sent).path("cache_prompt").asBoolean(true));
+                    Map.of(
+                        "finish_reason",
+                        "stop",
+                        "message",
+                        Map.of("content", Json.mapper().writeValueAsString(value))))));
+  }
+
+  @Test
+  void modelRequiresStructuredCompleteSourcesAndSendsStageOnly() {
+    var materials = new Materials();
+    UUID user = UUID.randomUUID(), run = UUID.randomUUID();
+    materials.begin(user, run);
+    var model = new InferenceClient(Json.mapper(), mock(AudioNormalizer.class), materials, base);
+    var task = SnapshotValidationTest.snapshot("suite");
+    var source = task.instruction().blocks().getFirst();
+    reply(envelope(new InstructionCompiler.Interpretation("rule", "Complete rule", true, false)));
+    assertTrue(model.interpret(run, source, "", Duration.ofSeconds(2)).complete());
+    assertTrue(requestBody.get().contains("Choose the correct letter"));
+    var prepared =
+        new InstructionCompiler.Compiled(
+            task.instruction().hash(),
+            List.of(new InstructionCompiler.Section("rule", source, "Complete rule", false)),
+            false);
+    reply(envelope(new InferenceClient.SourceSelection(List.of("rule"))));
     assertEquals(
-        new org.springframework.core.io.ClassPathResource("decision-system.txt")
-            .getContentAsString(StandardCharsets.UTF_8)
-            .strip(),
-        Json.mapper().readTree(sent).path("messages").get(0).path("content").asString());
-    assertTrue(sent.contains("Full rules. Speech alone is insufficient."));
-    assertTrue(sent.contains("background sound and emotional prosody"));
-    assertTrue(sent.contains("input_audio"));
-    assertTrue(sent.contains("data:image/png;base64"));
-    assertFalse(sent.contains("tools" + "\":"));
-    status.set(413);
+        List.of("rule"),
+        model
+            .sources(
+                task.parts().getFirst(),
+                task.parts().getFirst().fields(),
+                prepared,
+                Duration.ofSeconds(2))
+            .sourceIds());
+    reply(envelope(SnapshotValidationTest.answer()));
+    var answer =
+        model.answer(
+            run,
+            task.parts().getFirst(),
+            task.parts().getFirst().fields(),
+            prepared,
+            List.of("rule"),
+            Duration.ofSeconds(2));
+    assertEquals("ANSWER", answer.decision());
+    assertTrue(requestBody.get().contains("ORIGINAL SOURCE rule"));
+    assertTrue(requestBody.get().contains("cache_prompt"));
+    status.set(400);
     assertEquals(
         "MODEL_CONTEXT_UNSUPPORTED",
-        assertThrows(ApiException.class, () -> model.analyze(current, Duration.ofSeconds(2)))
-            .code());
-    status.set(503);
-    assertEquals(
-        "MODEL_UNAVAILABLE",
-        assertThrows(ApiException.class, () -> model.analyze(current, Duration.ofSeconds(2)))
+        assertThrows(
+                ApiException.class, () -> model.interpret(run, source, "", Duration.ofSeconds(2)))
             .code());
     status.set(200);
-    reply("{\"choices\":[{\"finish_reason\":\"length\"}]}");
+    reply("{}");
     assertEquals(
         "INVALID_MODEL_RESPONSE",
-        assertThrows(ApiException.class, () -> model.analyze(current, Duration.ofSeconds(2)))
+        assertThrows(
+                ApiException.class, () -> model.interpret(run, source, "", Duration.ofSeconds(2)))
             .code());
+    materials.close();
+  }
+
+  @Test
+  void oversizedSelectedMediaIsRejectedBeforeAnyBytesAreRead() {
+    var materials = mock(Materials.class);
+    var model = new InferenceClient(Json.mapper(), mock(AudioNormalizer.class), materials, base);
+    var s = SnapshotValidationTest.snapshot("suite");
+    var media = new ArrayList<Contracts.MediaAsset>();
+    for (int i = 0; i < 4; i++)
+      media.add(
+          new Contracts.MediaAsset(
+              "asset" + i, "image", "image/png", 20 * 1024 * 1024, "a".repeat(64), null));
+    var p = s.parts().getFirst();
+    var part = new Contracts.TaskPart(p.id(), p.title(), p.text(), media, p.fields(), List.of());
+    var prepared = new InstructionCompiler.Compiled(s.instruction().hash(), List.of(), false);
+    assertThrows(
+        ApiException.class,
+        () ->
+            model.answer(
+                UUID.randomUUID(), part, p.fields(), prepared, List.of(), Duration.ofSeconds(2)));
+    verifyNoInteractions(materials);
   }
 }

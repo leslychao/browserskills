@@ -1,92 +1,63 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach,describe,expect,it } from 'vitest';
 import { chromium } from 'playwright';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { startTestSite, type FixtureMode } from '../../../tests/test-site/server.js';
-import { FixedAdapter } from '../src/adapter.js';
+import type { FieldAnswer,SubmitPayload,TaskSet } from '@browserskills/contracts';
+import { YangAdapter } from '../src/adapter.js';
+import { instructionDom } from '../src/yang-dom.js';
 import { MediaStore } from '../src/media.js';
-import { fixtureProfile } from './fixture-profile.js';
-
-const cleanup: Array<() => Promise<unknown>> = [];
-afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
-async function setup(mode: FixtureMode = 'normal') {
-  const site = await startTestSite(mode); cleanup.push(site.close);
-  const directory = await mkdtemp(join(tmpdir(), 'browserskills-adapter-')); cleanup.push(() => rm(directory, {recursive:true,force:true}));
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true }); cleanup.push(() => browser.close());
-  const context = await browser.newContext({acceptDownloads:false});
-  const page = await context.newPage(); await page.goto(site.url);
-  const store = new MediaStore(directory); cleanup.push(() => store.clear());
-  const adapter = new FixedAdapter(page, store, [fixtureProfile(site.url)], {verificationTimeoutMs:300});
-  return {site,page,store,adapter};
+import { startYangFixture,type YangFixtureMode } from './yang-fixture.js';
+const cleanup:Array<()=>Promise<unknown>>=[];
+afterEach(async()=>{for(const fn of cleanup.splice(0).reverse())await fn();});
+async function setup(mode:YangFixtureMode='normal',reserve=true){
+  const site=await startYangFixture(mode);cleanup.push(site.close);const directory=await mkdtemp(join(tmpdir(),'yang-adapter-'));cleanup.push(()=>rm(directory,{recursive:true,force:true}));
+  const browser=await chromium.launch({headless:true,chromiumSandbox:true});cleanup.push(()=>browser.close());const context=await browser.newContext();const page=await context.newPage();await page.goto(site.url);
+  const media=new MediaStore(directory);cleanup.push(()=>media.clear());const adapter=new YangAdapter(page,media,{origin:site.url,frameOrigin:site.url,mediaOrigins:[site.url],instructionOrigins:[site.url],verificationTimeoutMs:250});
+  if(reserve)await adapter.selectProject(site.pool);return {site,page,media,adapter};
 }
-
-describe('real Chromium submission unit and identity', () => {
-  it('sends fifty distinct tasks exactly once each', async () => {
-    const {site,adapter} = await setup();
-    for (let i=1;i<=50;i++) {
-      const snapshot = await adapter.snapshot();
-      expect(snapshot.taskId).toBe(`task-${i}`);
-      const result = await adapter.submit({taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id});
-      expect(result.outcome).toBe('SUBMITTED');
-    }
-    expect(site.state.submissions).toHaveLength(50);
-    expect(new Set(site.state.submissions.map(s=>s.taskId)).size).toBe(50);
-  }, 90_000);
-  it('does not conflate identical content and distinct task identities', async () => {
-    const {adapter} = await setup('identical'); const first=await adapter.snapshot();
-    await adapter.submit({taskId:first.taskId,snapshotHash:first.snapshotHash,instructionHash:first.instruction.hash,optionId:first.options[0]!.id});
-    const second=await adapter.snapshot(); expect(second.taskId).not.toBe(first.taskId); expect(second.question).toBe(first.question);
+const answers=(task:TaskSet):FieldAnswer[]=>task.parts.flatMap(part=>part.fields.map(field=>({partId:part.id,fieldId:field.id,value:field.kind==='NUMBER'?2:field.kind==='TEXT'?'Example':field.kind==='MULTI_CHOICE'?[field.options[0]!.id]:field.options[0]!.id})));
+const payload=(task:TaskSet,values=answers(task)):SubmitPayload=>({poolId:task.poolId,suiteId:task.suiteId,snapshotHash:task.snapshotHash,instructionHash:task.instruction.hash,answers:values});
+describe('Yang owned Chromium integration',()=>{
+  it('reads the complete loaded instruction document',async()=>{const {page,site}=await setup('normal',false);await page.goto(site.url+'/instructions/'+site.pool);expect(await page.frames()[1]!.evaluate(instructionDom)).toHaveProperty('blocks');});
+  it('discovers pool identity through instruction modal without reserving; refresh preserves an active suite',async()=>{
+    const {site,page,adapter}=await setup('normal',false);expect(await adapter.session()).toMatchObject({state:'READY'});expect(await adapter.catalogue(true)).toMatchObject({items:[{poolId:site.pool,reward:{amount:'15.00',unit:'за задание'}}]});expect(site.state.reservations).toBe(0);
+    await adapter.selectProject(site.pool);const url=page.url();expect(await adapter.catalogue(true)).toMatchObject({activeSuiteId:'suite-1'});expect(page.url()).toBe(url);expect(site.state.reservations).toBe(1);await expect(adapter.selectProject('other')).rejects.toMatchObject({code:'ACTIVE_SUITE_EXISTS'});
   });
-  it.each(['instruction','task','rerender'] as const)('rejects changed %s before click', async change => {
-    const {adapter,page,site}=await setup(); const snapshot=await adapter.snapshot();
-    await page.evaluate(change => {
-      if(change==='instruction') document.querySelector('#instructions')!.textContent='Changed rules';
-      if(change==='task') document.querySelector('#task')!.setAttribute('data-task-id','replacement');
-      if(change==='rerender') { const old=document.querySelector('#task')!; old.replaceWith(old.cloneNode(true)); }
-    }, change);
-    await expect(adapter.submit({taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id})).rejects.toMatchObject({code:'STALE_TASK'});
-    expect(site.state.submissions).toHaveLength(0);
+  it('detects session expiry, two factor and completed login from DOM',async()=>{
+    const {site,page,adapter}=await setup('normal',false);expect((await adapter.session()).state).toBe('READY');site.state.auth='LOGIN';await page.reload();expect((await adapter.session()).state).toBe('AUTH_EXPIRED');site.state.auth='OTP';await page.reload();expect((await adapter.session()).state).toBe('TWO_FACTOR_REQUIRED');site.state.auth='READY';await page.reload();expect((await adapter.session()).state).toBe('READY');
   });
-  it.each(['multi','no-instruction','unsupported-link'] as const)('blocks incomplete or unsupported %s tasks', async mode => {
-    const {adapter}=await setup(mode); await expect(adapter.snapshot()).rejects.toHaveProperty('code');
+  it('fills all supported controls and submits a whole platform suite once, with unchanged content hash',async()=>{
+    const {site,adapter}=await setup();const first=await adapter.snapshot();expect(first.parts).toHaveLength(1);expect(first.parts[0]!.fields.map(f=>f.kind)).toEqual(['SINGLE_CHOICE','MULTI_CHOICE','TEXT','NUMBER']);
+    const filled=await adapter.apply(payload(first));expect(filled.snapshotHash).toBe(first.snapshotHash);expect(await adapter.submit(payload(filled))).toMatchObject({outcome:'SUBMITTED',nextSuiteId:'suite-2'});expect(site.state.submissions).toEqual(['suite-1']);await expect(adapter.submit(payload(filled))).rejects.toHaveProperty('code');
   });
-  it.each(['lost','stale-success'] as const)('preserves uncertainty after %s', async mode => {
-    const {adapter,site}=await setup(mode); const snapshot=await adapter.snapshot(); const payload={taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id};
-    expect((await adapter.submit(payload)).outcome).toBe('UNKNOWN');
-    await expect(adapter.submit(payload)).rejects.toMatchObject({code:'ALREADY_ATTEMPTED'});
-    expect(site.state.submissions).toHaveLength(1);
-  });
-  it('validation errors dominate success and never count as submitted', async () => {
-    const {adapter,page,site}=await setup('reject'); const snapshot=await adapter.snapshot();
-    await page.locator('#success').evaluate(el => (el as HTMLElement).hidden=false);
-    expect((await adapter.submit({taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id})).outcome).toBe('REJECTED');
-    expect(site.state.submissions).toHaveLength(0);
-  });
-  it('production registry cannot treat the fixture as a verified Yandex template', async () => {
-    const {page,store}=await setup(); await expect(new FixedAdapter(page,store).snapshot()).rejects.toMatchObject({code:'UNSUPPORTED_ORIGIN'});
-  });
-  it('does not submit when selecting the answer replaces the active task',async()=>{
-    const {adapter,site}=await setup('swap-on-select');const snapshot=await adapter.snapshot();
-    await expect(adapter.submit({taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id})).rejects.toMatchObject({code:'STALE_TASK'});
-    expect(site.state.submissions).toHaveLength(0);
-  });
-  it('binds a single explicitly allowed iframe and invalidates replaced frames',async()=>{
-    const {page,store,site}=await setup();const child=await startTestSite();cleanup.push(child.close);
-    await page.setContent(`<iframe id="task-frame" src="${child.url}"></iframe>`);
-    await page.frameLocator('#task-frame').locator('#task').waitFor();
-    const profile={...fixtureProfile(site.url),frame:{selector:'#task-frame',origin:child.url},mediaOrigins:[child.url]};
-    const adapter=new FixedAdapter(page,store,[profile]);const snapshot=await adapter.snapshot();expect(snapshot.taskId).toBe('task-1');
-    await page.locator('#task-frame').evaluate(frame=>frame.replaceWith(frame.cloneNode(true)));
-    await page.frameLocator('#task-frame').locator('#task').waitFor();
-    await expect(adapter.submit({taskId:snapshot.taskId,snapshotHash:snapshot.snapshotHash,instructionHash:snapshot.instruction.hash,optionId:snapshot.options[0]!.id})).rejects.toMatchObject({code:'STALE_TASK'});
-    expect(child.state.submissions).toHaveLength(0);
-  });
-  it('rejects an iframe origin not explicitly allowed by the fixed profile',async()=>{
-    const {page,store,site}=await setup();const child=await startTestSite();cleanup.push(child.close);
-    await page.setContent(`<iframe id="task-frame" src="${child.url}"></iframe>`);await page.frameLocator('#task-frame').locator('#task').waitFor();
-    const adapter=new FixedAdapter(page,store,[{...fixtureProfile(site.url),frame:{selector:'#task-frame',origin:site.url}}]);
-    await expect(adapter.snapshot()).rejects.toMatchObject({code:'UNSUPPORTED_TEMPLATE'});
-  });
+  it('never sends an incomplete or forged answer set',async()=>{const {site,adapter}=await setup();const task=await adapter.snapshot();await expect(adapter.apply(payload(task,[{partId:'part-1',fieldId:'unobserved',value:'x'}]))).rejects.toMatchObject({code:'UNKNOWN_FIELD'});await expect(adapter.submit(payload(task,[]))).rejects.toMatchObject({code:'MISSING_REQUIRED_FIELD'});expect(site.state.submissions).toEqual([]);});
+  it('invalidates answers after an instruction change',async()=>{const {site,adapter}=await setup();const task=await adapter.snapshot();site.state.instruction='Changed rules';await expect(adapter.apply(payload(task))).rejects.toMatchObject({code:'INSTRUCTION_CHANGED'});expect(site.state.submissions).toEqual([]);});
+  it('blocks resubmission after lost acknowledgement even after a fresh snapshot',async()=>{const {site,adapter}=await setup('unknown');let task=await adapter.snapshot();task=await adapter.apply(payload(task));expect(await adapter.submit(payload(task))).toMatchObject({outcome:'UNKNOWN'});task=await adapter.snapshot();await expect(adapter.submit(payload(task))).rejects.toMatchObject({code:'SUBMIT_ALREADY_ATTEMPTED'});expect(site.state.submissions).toHaveLength(1);});
+  it('maps opaque controls only by exhaustive non-overlapping observed ids',async()=>{const {adapter}=await setup('opaque');const first=await adapter.snapshot();const ids=first.parts[0]!.unmappedControls.map(c=>c.id);expect(ids).toHaveLength(2);const input={suiteId:first.suiteId,snapshotHash:first.snapshotHash,groups:[{partId:'part-1',fieldId:'preference',label:'Preference',kind:'SINGLE_CHOICE' as const,controlIds:ids}]};await expect(adapter.mapFields({...input,groups:[{...input.groups[0]!,controlIds:[ids[0]!,ids[0]!]}]})).rejects.toMatchObject({code:'INVALID_FIELD_MAPPING'});const mapped=await adapter.mapFields(input);expect(mapped.parts[0]!.unmappedControls).toEqual([]);expect((await adapter.apply(payload(mapped))).parts[0]!.fields[0]!.value).toBe(ids[0]);});
+  it('extracts all five voice pairs, unnamed question groups, two originals and overall stage ordering',async()=>{const {adapter}=await setup('voices');const task=await adapter.snapshot();expect(task.parts).toHaveLength(5);for(const part of task.parts){expect(part.media).toHaveLength(2);expect(part.fields.map(f=>f.stage)).toEqual([0,0,1]);}expect((await adapter.apply(payload(task))).parts).toHaveLength(5);});
+  it('visits all audio aspect pairs, exposes equal-rating comparisons and verifies the entire suite',async()=>{const {adapter,site}=await setup('aspects');const task=await adapter.snapshot();expect(task.parts).toHaveLength(3);for(const part of task.parts){expect(part.media).toHaveLength(2);expect(part.fields).toHaveLength(14);expect(part.fields[0]!.stage).toBe(0);}let filled=await adapter.apply(payload(task));expect(filled.parts.every(p=>p.fields[0]!.value!==null)).toBe(true);for(const part of filled.parts){expect(part.fields).toHaveLength(20);expect(part.fields.filter(f=>f.stage===2)).toHaveLength(6);}filled=await adapter.apply(payload(filled));expect((await adapter.submit(payload(filled))).outcome).toBe('SUBMITTED');expect(site.state.submissions).toEqual(['suite-1']);});
+  it('uses anchored live countdown and never extends its saved suite deadline',async()=>{const {adapter,page}=await setup();const first=await adapter.snapshot();await page.locator('.task-info__values-time').evaluate(e=>{e.textContent='25:00';});expect((await adapter.snapshot()).expiresAt).toBe(first.expiresAt);await page.locator('.task-info__values-time').evaluate(e=>{e.textContent='0:00';});await expect(adapter.snapshot()).rejects.toMatchObject({code:'TASK_EXPIRED'});await page.locator('.task-info__values-time').evaluate(e=>e.remove());await expect(adapter.snapshot()).rejects.toMatchObject({code:'TASK_TIMER_UNAVAILABLE'});});
+  it('returns newly exposed conditional fields for a new analysis round',async()=>{const {adapter}=await setup('conditional');const first=await adapter.snapshot();const after=await adapter.apply(payload(first));expect(after.parts[0]!.fields).toHaveLength(2);expect(after.snapshotHash).not.toBe(first.snapshotHash);await expect(adapter.submit(payload(after,answers(first)))).rejects.toMatchObject({code:'MISSING_REQUIRED_FIELD'});});
+  it('rejects expired suites and non Yang production origin',async()=>{const {adapter,page,media}=await setup('expired');await expect(adapter.snapshot()).rejects.toMatchObject({code:'TASK_EXPIRED'});await expect(new YangAdapter(page,media).snapshot()).rejects.toMatchObject({code:'YANG_LOGIN_REQUIRED'});});
+  it('extracts an original image and releases task originals after accepted submission',async()=>{const {adapter,media}=await setup('image');let task=await adapter.snapshot();const id=task.parts[0]!.media[0]!.id;expect(media.metadata(id).mimeType).toBe('image/png');task=await adapter.apply(payload(task));expect((await adapter.submit(payload(task))).outcome).toBe('SUBMITTED');expect(()=>media.metadata(id)).toThrow();});
+  it('keeps complete instruction media and rejects unavailable linked sources',async()=>{const {adapter,site}=await setup();site.state.instruction='<p>Compare this example</p><audio src="/audio.wav"></audio><img src="/image.png">';const instruction=await adapter.instruction(site.pool);expect(instruction.blocks.map(b=>b.type)).toEqual(['text','audio','image','text']);site.state.instruction='<a href="https://untrusted.example/rules.html">Rules</a>';await expect(adapter.instruction(site.pool)).rejects.toMatchObject({code:'INSTRUCTIONS_SOURCE_UNSUPPORTED'});});
+  it('requires an active suite and rejects missing task frame',async()=>{const {adapter,page,site}=await setup('normal',false);await expect(adapter.snapshot()).rejects.toMatchObject({code:'NO_ACTIVE_SUITE'});await expect(adapter.selectProject('missing')).rejects.toMatchObject({code:'PROJECT_UNAVAILABLE'});await adapter.selectProject(site.pool);await page.locator('iframe').evaluate(e=>e.remove());await expect(adapter.snapshot()).rejects.toMatchObject({code:'UNSUPPORTED_TASK_FRAME'});});
+  it('invalidates captured answers when controls change before apply',async()=>{const {adapter,page}=await setup();const task=await adapter.snapshot();await page.frames()[1]!.locator('legend').first().evaluate(e=>{e.textContent='Changed question';});await expect(adapter.apply(payload(task))).rejects.toMatchObject({code:'STALE_TASK'});});
+  it('enforces earlier question stages and numeric constraints before filling',async()=>{const {adapter}=await setup('voices');const task=await adapter.snapshot();const final=task.parts[0]!.fields.find(f=>f.stage===1)!;await expect(adapter.apply(payload(task,[{partId:'part-1',fieldId:final.id,value:final.options[0]!.id}]))).rejects.toMatchObject({code:'EARLIER_STAGE_INCOMPLETE'});});
+  it('rejects invalid types, duplicate answers, stale hashes and cancelled work before any submit',async()=>{const {adapter,site}=await setup();const task=await adapter.snapshot();const value=answers(task)[0]!;await expect(adapter.apply(payload(task,[value,value]))).rejects.toMatchObject({code:'DUPLICATE_FIELD_ANSWER'});await expect(adapter.apply(payload(task,[{...value,value:'missing-option'}]))).rejects.toMatchObject({code:'INVALID_FIELD_VALUE'});await expect(adapter.apply({...payload(task),snapshotHash:'a'.repeat(64)})).rejects.toMatchObject({code:'STALE_TASK'});adapter.cancel();await expect(adapter.snapshot()).rejects.toMatchObject({code:'STOPPED'});expect(site.state.submissions).toEqual([]);});
+  it('rejects partial/foreign mappings and detects changed mapped source controls',async()=>{const {adapter,page}=await setup('opaque');const task=await adapter.snapshot();const ids=task.parts[0]!.unmappedControls.map(c=>c.id);const mapping={suiteId:task.suiteId,snapshotHash:task.snapshotHash,groups:[{partId:'part-1',fieldId:'preference',label:'Preference',kind:'SINGLE_CHOICE' as const,controlIds:ids}]};await expect(adapter.mapFields({...mapping,groups:[]})).rejects.toMatchObject({code:'INCOMPLETE_FIELD_MAPPING'});await expect(adapter.mapFields({...mapping,groups:[{...mapping.groups[0]!,controlIds:[ids[0]!,'foreign']}]})).rejects.toMatchObject({code:'INVALID_FIELD_MAPPING'});await page.frames()[1]!.locator('button[aria-pressed]').first().evaluate(e=>{e.textContent='Changed';});await expect(adapter.mapFields(mapping)).rejects.toMatchObject({code:'STALE_TASK'});});
+  it('guards the actual trusted click when the form changes on pointerdown',async()=>{const {adapter,page,site}=await setup();const task=await adapter.snapshot();await page.frames()[1]!.locator('input').first().evaluate(e=>e.addEventListener('pointerdown',()=>{document.querySelector('legend')!.textContent='Changed just before click';}));await expect(adapter.apply(payload(task))).rejects.toMatchObject({code:'STALE_TASK'});expect(site.state.submissions).toHaveLength(0);});
+  it('stops when answering changes source materials rather than just exposing a conditional field',async()=>{const {adapter,page}=await setup();const task=await adapter.snapshot();await page.frames()[1]!.locator('input').first().evaluate(e=>e.addEventListener('change',()=>{document.querySelector('h2')!.textContent='Different source question';}));await expect(adapter.apply(payload(task))).rejects.toMatchObject({code:'STALE_TASK'});});
+  it('guards the outer submit route at the trusted click and does not silently resend',async()=>{const {adapter,page,site}=await setup();let task=await adapter.snapshot();task=await adapter.apply(payload(task));await page.locator('#submit').evaluate(e=>e.addEventListener('pointerdown',()=>history.pushState({},'',location.pathname+'-changed')));expect(await adapter.submit(payload(task))).toMatchObject({outcome:'UNKNOWN',code:'SUBMIT_GUARD_CHANGED'});expect(site.state.submissions).toHaveLength(0);});
+  it('does not submit when outer pointerdown changes an iframe answer after the final snapshot',async()=>{const {adapter,page,site}=await setup();let task=await adapter.snapshot();task=await adapter.apply(payload(task));await page.locator('#submit').evaluate(e=>e.addEventListener('pointerdown',()=>{const frame=document.querySelector('iframe')!;const input=frame.contentDocument!.querySelector('input[type="number"]') as HTMLInputElement;input.value='5';}));expect(await adapter.submit(payload(task))).toMatchObject({outcome:'UNKNOWN'});expect(site.state.submissions).toEqual([]);});
+  it('compares multiple-choice selections as a set in apply and submit',async()=>{const {adapter}=await setup();const first=await adapter.snapshot();const values=answers(first);const multi=first.parts[0]!.fields.find(f=>f.kind==='MULTI_CHOICE')!;values.find(a=>a.fieldId===multi.id)!.value=multi.options.map(o=>o.id).reverse();const filled=await adapter.apply(payload(first,values));expect((await adapter.submit(payload(filled,values))).outcome).toBe('SUBMITTED');});
+  it('rejects two checked options for a single-choice field rather than hiding the second',async()=>{const {adapter,page}=await setup();await page.frames()[1]!.locator('input[type="radio"]').evaluateAll(elements=>{elements.forEach(e=>{(e as HTMLInputElement).removeAttribute('name');(e as HTMLInputElement).checked=true;});});await expect(adapter.snapshot()).rejects.toMatchObject({code:'AMBIGUOUS_SELECTION'});});
+  it('rejects multiple pressed mapped options and denied source documents or instruction iframes',async()=>{const {adapter,page,site}=await setup('opaque');const initial=await adapter.snapshot();const task=await adapter.mapFields({suiteId:initial.suiteId,snapshotHash:initial.snapshotHash,groups:[{partId:'part-1',fieldId:'preference',label:'Preference',kind:'SINGLE_CHOICE',controlIds:initial.parts[0]!.unmappedControls.map(c=>c.id)}]});await page.frames()[1]!.locator('button[aria-pressed]').evaluateAll(elements=>elements.forEach(e=>e.setAttribute('aria-pressed','true')));await expect(adapter.snapshot()).rejects.toMatchObject({code:'AMBIGUOUS_SELECTION'});site.state.instruction=`<a href="${site.url}/denied.html">Full rules</a>`;await expect(adapter.instruction(task.poolId)).rejects.toMatchObject({code:'SOURCE_UNAVAILABLE'});site.state.instructionStatus=403;await expect(adapter.instruction(task.poolId)).rejects.toMatchObject({code:'SOURCE_UNAVAILABLE'});});
+  it('detects already reserved work from the active catalogue before starting a different project',async()=>{const {adapter,page,site}=await setup();await page.goto(site.url);const catalogue=await adapter.catalogue();expect(catalogue.activePoolId).toBe(site.pool);expect(catalogue.activeSuiteId).toBeNull();await expect(adapter.selectProject('different')).rejects.toMatchObject({code:'ACTIVE_SUITE_EXISTS'});expect(site.state.reservations).toBe(1);});
+  it('rejects ambiguous pagination rather than treating pages as a complete suite',async()=>{const {adapter,page}=await setup();await page.frames()[1]!.locator('body').evaluate(e=>e.insertAdjacentHTML('afterbegin','<button type="button">2</button><button type="button">3</button>'));await expect(adapter.snapshot()).rejects.toMatchObject({code:'AMBIGUOUS_PAGINATION'});});
+  it('reads explicit deadlines, hourly countdowns and refuses malformed timers',async()=>{const {adapter,page}=await setup();await page.locator('.task-info__values-time').evaluate(e=>{e.textContent='01:00:00';});expect(Date.parse((await adapter.snapshot()).expiresAt!)).toBeGreaterThan(Date.now()+3500_000);await page.locator('.task-info__values-time').evaluate(e=>{e.textContent='unknown';});await expect(adapter.snapshot()).rejects.toMatchObject({code:'TASK_TIMER_UNAVAILABLE'});const future=new Date(Date.now()+30_000).toISOString();await page.locator('.task-info__values-time').evaluate((e,future)=>{e.outerHTML='<time datetime="'+future+'"></time>';},future);expect((await adapter.snapshot()).expiresAt).toBe(future);});
+  it('rejects an authentication form masquerading as the instruction and unsupported PDF sources',async()=>{const {adapter,site}=await setup();site.state.instruction='<input type="password">';await expect(adapter.instruction(site.pool)).rejects.toMatchObject({code:'INSTRUCTIONS_AUTH_REQUIRED'});site.state.instruction='<a href="'+site.url+'/rules.pdf">Rules</a>';await expect(adapter.instruction(site.pool)).rejects.toMatchObject({code:'INSTRUCTIONS_SOURCE_UNSUPPORTED'});});
+  it('fills native select, preserves ordered choice labels and enforces numeric steps',async()=>{const {adapter,page}=await setup();await page.frames()[1]!.locator('form').evaluate(form=>form.insertAdjacentHTML('beforeend','<label>Choose<select><option value="a">Alpha</option><option value="b">Beta</option></select></label>'));const task=await adapter.snapshot();const values=answers(task);const number=task.parts[0]!.fields.find(f=>f.kind==='NUMBER')!;values.find(a=>a.fieldId===number.id)!.value=2.5;await expect(adapter.apply(payload(task,values))).rejects.toMatchObject({code:'INVALID_FIELD_VALUE'});const fresh=await adapter.snapshot();const filled=await adapter.apply(payload(fresh));expect(filled.parts[0]!.fields.find(f=>f.label==='Choose')!.value).toBe(fresh.parts[0]!.fields.find(f=>f.label==='Choose')!.options[0]!.id);});
+  it.each([['complete','COMPLETE'],['accepted','SUBMITTED'],['login','UNKNOWN']] as const)('distinguishes explicit %s acknowledgement from authentication loss',async(acknowledgement,outcome)=>{const {adapter,site}=await setup();site.state.acknowledgement=acknowledgement;const task=await adapter.snapshot();const filled=await adapter.apply(payload(task));expect((await adapter.submit(payload(filled))).outcome).toBe(outcome);expect(site.state.submissions).toHaveLength(1);});
 });

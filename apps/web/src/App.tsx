@@ -1,20 +1,28 @@
 import { useCallback,useEffect,useRef,useState } from 'react';
-import type { BrowserStatus,Me,RunSummary,RunView } from '@browserskills/contracts';
+import { SelectionSettingsSchema } from '@browserskills/contracts';
+import type { BrowserStatus,Catalogue,Me,RunSummary,RunView,SelectionSettings,YangSession } from '@browserskills/contracts';
 import { ApiClient,ClientError } from './api';
 import { Login } from './Login';
 import { RemoteBrowser } from './RemoteBrowser';
-import { ReviewPanel } from './ReviewPanel';
-import { newRequestId } from './request-id';
+import { SelectionPanel } from './SelectionPanel';
+import { TaskSetPanel } from './TaskSetPanel';
 
 const defaultClient=new ApiClient();
-export const activeStatuses=new Set(['PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING']);
-export const statusLabels:Record<RunView['status'],string>={PREPARING:'Читаем инструкцию',ANALYZING:'Анализируем задание',AWAITING_CONFIRMATION:'Нужно ваше подтверждение',SUBMITTING:'Проверяем отправку',COMPLETED:'Завершён',STOPPED:'Остановлен',INTERRUPTED:'Прерван',UNKNOWN:'Результат неизвестен',FAILED:'Ошибка'};
+export const activeStatuses=new Set(['SELECTING','PREPARING','ANALYZING','FILLING','WAITING_FOR_AUTH','WAITING_FOR_USER','SUBMITTING']);
+const pausedStatuses=new Set(['WAITING_FOR_AUTH','WAITING_FOR_USER']);
+export const statusLabels:Record<RunView['status'],string>={SELECTING:'Выбираем проект',PREPARING:'Готовим инструкцию',ANALYZING:'Анализируем набор',FILLING:'Заполняем и проверяем форму',WAITING_FOR_AUTH:'Ожидаем вход в Янг',WAITING_FOR_USER:'Нужно ваше действие',SUBMITTING:'Проверяем отправку',COMPLETED:'Завершён',STOPPED:'Остановлен',INTERRUPTED:'Прерван',UNKNOWN:'Результат неизвестен',FAILED:'Ошибка'};
+const authLabels:Record<YangSession['state'],string>={LOGIN_REQUIRED:'Требуется вход в Янг',TWO_FACTOR_REQUIRED:'Требуется второй фактор',READY:'Янг подключён',AUTH_EXPIRED:'Сессия Янг истекла',UNKNOWN:'Проверяем подключение Янг'};
+const runMessages:Partial<Record<RunView['status'],string>>={SELECTING:'Обновляем каталог и выбираем подходящий проект.',PREPARING:'Читаем разделы инструкции и обрабатываем все примеры.',ANALYZING:'Анализируем материалы локальной моделью. Набор ещё не отправлен.',FILLING:'Сверяем ответы, обязательные и условные поля во всех частях набора.',WAITING_FOR_AUTH:'Откройте Янг, завершите вход и нажмите «Продолжить».',WAITING_FOR_USER:'Устраните указанную причину остановки. Продолжение повторно проверит набор.',SUBMITTING:'Ожидаем подтверждение Янг. Повторная отправка недоступна.'};
+const resultLabels={DRAFT:'Подготовлено',SUBMIT_INTENT:'Отправка начата',SUBMITTED:'Отправлено',UNKNOWN:'Результат неизвестен',FAILED:'Ошибка'};
 const time=(value:string)=>new Intl.DateTimeFormat('ru',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(value));
 
 export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;pollInterval?:number}) {
   const [me,setMe]=useState<Me|null>(null);
   const [initial,setInitial]=useState(true);
   const [browser,setBrowser]=useState<BrowserStatus|null>(null);
+  const [catalogue,setCatalogue]=useState<Catalogue|null>(null);
+  const [selection,setSelection]=useState<SelectionSettings|null>(null);
+  const [saved,setSaved]=useState(false);
   const [runs,setRuns]=useState<RunSummary[]>([]);
   const [runId,setRunId]=useState<string|null>(null);
   const [view,setView]=useState<RunView|null>(null);
@@ -23,7 +31,8 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
   const [limit,setLimit]=useState(50);
   const inFlight=useRef(false);
   const revision=useRef(0);
-  const reset=useCallback(()=>{revision.current++;setMe(null);setBrowser(null);setRuns([]);setView(null);setRunId(null);},[]);
+  const sessionEpoch=useRef(0);
+  const reset=useCallback(()=>{sessionEpoch.current++;revision.current++;setMe(null);setBrowser(null);setCatalogue(null);setSelection(null);setSaved(false);setRuns([]);setView(null);setRunId(null);setLimit(50);},[]);
   const handleError=useCallback((cause:unknown)=>{
     if(cause instanceof ClientError&&cause.status===401)reset();
     setError(cause instanceof Error?cause.message:'Не удалось выполнить действие. Проверьте состояние сервера.');
@@ -33,6 +42,12 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
     client.me().then(value=>{if(!disposed)setMe(value);}).catch(cause=>{if(!disposed&&!(cause instanceof ClientError&&cause.status===401))handleError(cause);}).finally(()=>{if(!disposed)setInitial(false);});
     return()=>{disposed=true;};
   },[client,handleError]);
+  useEffect(()=>{
+    if(!me)return;
+    let disposed=false;const epoch=sessionEpoch.current;
+    client.selection().then(value=>{if(!disposed&&epoch===sessionEpoch.current)setSelection(value);}).catch(cause=>{if(!disposed&&epoch===sessionEpoch.current)handleError(cause);});
+    return()=>{disposed=true;};
+  },[me?.id,client,handleError]);
   const act=async(action:()=>Promise<void>)=>{
     if(inFlight.current)return;
     inFlight.current=true;revision.current++;setPending(true);setError(null);
@@ -45,9 +60,9 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
       if(inFlight.current||polling)return;
       polling=true;const currentRevision=revision.current;
       try{
-        const [identity,status,list]=await Promise.all([client.me(),client.browser(),client.runs()]);
+        const [identity,status,list,projects]=await Promise.all([client.me(),client.browser(),client.runs(),client.catalogue()]);
         if(disposed||currentRevision!==revision.current)return;
-        setMe(identity);setBrowser(status);setRuns(list);
+        setMe(identity);setBrowser(status);setRuns(list);setCatalogue(projects);
         const selected=runId??list.find(run=>activeStatuses.has(run.status))?.id??list[0]?.id;
         if(selected){
           const value=await client.run(selected);
@@ -63,30 +78,52 @@ export function App({client=defaultClient,pollInterval=1000}:{client?:ApiClient;
   if(initial)return <main className="loading" role="status">Открываем рабочее пространство…</main>;
   if(!me)return <Login busy={pending} error={error} onLogin={(login,password)=>act(async()=>{await client.login(login,password);setMe(await client.me());})}/>;
 
-  const active=runs.some(run=>activeStatuses.has(run.status))||(view!==null&&activeStatuses.has(view.status));
+  const activeRun=runs.find(run=>activeStatuses.has(run.status))??(view&&activeStatuses.has(view.status)?view:null);
+  const active=activeRun!==null;
+  const paused=activeRun!==null&&pausedStatuses.has(activeRun.status);
   const manual=browser?.mode==='MANUAL';
-  const canStart=browser!==null&&browser.mode!=='CLOSED'&&!active&&Number.isInteger(limit)&&limit>=1&&limit<=50;
+  const ready=browser?.yang.state==='READY'&&browser.mode!=='CLOSED';
+  const validSelection=SelectionSettingsSchema.safeParse(selection).success;
+  const chosen=selection?.poolId?catalogue?.items.find(item=>item.poolId===selection.poolId):null;
+  const manualTarget=selection?.poolId?chosen&&chosen.availability!=='UNAVAILABLE'&&chosen.preparation!=='BLOCKED':catalogue?.activeSuiteId;
+  const canStart=ready&&!active&&validSelection&&Number.isInteger(limit)&&limit>=1&&limit<=50&&(selection?.mode==='AUTO'||Boolean(manualTarget));
+  const updateView=(value:RunView)=>{setView(value);setRunId(value.id);setRuns(previous=>[value,...previous.filter(item=>item.id!==value.id)]);};
+  const connect=()=>act(async()=>{if(!browser||browser.mode==='CLOSED')setBrowser(await client.openBrowser());setBrowser(await client.enterManual());});
+  const save=()=>act(async()=>{if(!selection)return;setSelection(await client.saveSelection(selection));setSaved(true);});
+  const start=()=>act(async()=>{
+    if(!selection||!canStart)return;
+    const savedSelection=await client.saveSelection(selection);setSelection(savedSelection);setSaved(true);
+    if(manual)setBrowser(await client.exitManual());
+    updateView(await client.startRun(limit,savedSelection));setBrowser(await client.browser());
+  });
   return <div className="workspace">
     <aside className="sidebar"><a className="brand" href="/" aria-label="BrowserSkills"><span className="brand-mark">b.</span> BrowserSkills</a><div className="sidebar-context">Яндекс Янг<span>Рабочее пространство</span></div>
       <div className="sidebar-heading">Запуски <span>{runs.length}</span></div>
-      <nav aria-label="История запусков" className="history">{runs.length===0?<p>История появится после первого запуска.</p>:runs.map(run=><button key={run.id} className={run.id===view?.id?'current':''} onClick={()=>{if(run.id!==runId){setRunId(run.id);setView(null);}}} disabled={pending}><span>{time(run.createdAt)}</span><small>{statusLabels[run.status]} · {run.processed}/{run.maxTasks}</small></button>)}</nav>
+      <nav aria-label="История запусков" className="history">{runs.length===0?<p>История появится после первого запуска.</p>:runs.map(run=><button key={run.id} className={run.id===view?.id?'current':''} onClick={()=>{if(run.id!==runId){revision.current++;setRunId(run.id);setView(null);}}} disabled={pending}><span>{time(run.createdAt)}</span><small>{statusLabels[run.status]} · {run.processed}/{run.maxTasks}</small></button>)}</nav>
       <div className="account"><span className="avatar">{me.login.slice(0,1).toUpperCase()}</span><div><strong>{me.login}</strong><small>Личный профиль</small></div><button className="link-button" disabled={pending} onClick={()=>void act(async()=>{await client.logout();reset();})}>Выйти</button></div>
     </aside>
-    <main className="main"><header className="page-heading"><div><span className="eyebrow">Ваш помощник</span><h1>Яндекс Янг</h1><p>От инструкции к ответу — с вашей проверкой.</p></div><div className="quota"><strong>{me.quota.remaining}<span> / {me.quota.limit}</span></strong><small>AI-запросов до {time(me.quota.resetsAt)}</small></div></header>
+    <main className="main"><header className="page-heading"><div><span className="eyebrow">Ваш помощник</span><h1>Яндекс Янг</h1><p>Выберите проект. Помощник прочитает инструкцию и выполнит задания.</p></div><div className="quota"><strong>{me.quota.remaining}<span> / {me.quota.limit}</span></strong><small>AI-запросов до {time(me.quota.resetsAt)}</small></div></header>
       {error&&<div role="alert" className="notice error global-error">{error}<button className="link-button" onClick={()=>setError(null)} aria-label="Закрыть сообщение">×</button></div>}
-      <section className="browser-controls" aria-label="Управление браузером"><div><span className={`dot ${browser&&browser.mode!=='CLOSED'?'online':''}`}/><strong>{browser?.mode==='CLOSED'||browser===null?'Браузер не открыт':manual?'Вы управляете браузером':browser.mode==='AUTOMATION'?'Браузер выполняет запуск':'Браузер готов'}</strong><p>Войдите в Яндекс и откройте задание в своём профиле.</p></div><div className="button-row">
-        {browser?.mode==='CLOSED'||browser===null?<button disabled={pending} onClick={()=>void act(async()=>setBrowser(await client.openBrowser()))}>Открыть браузер</button>:<button disabled={pending||active} onClick={()=>void act(async()=>setBrowser(manual?await client.exitManual():await client.enterManual()))}>{manual?'Завершить ручное управление':'Открыть Яндекс'}</button>}
+      <section className="browser-controls" aria-label="Подключение Янг"><div><span className={`dot ${ready?'online':''}`}/><strong role="status">{browser?authLabels[browser.yang.state]:'Проверяем подключение Янг'}</strong><p>{browser?.yang.message??'Вход и одноразовый код вводятся в форме Яндекса. Успешный вход определится автоматически.'}</p></div><div className="button-row">
+        {manual?<button disabled={pending} onClick={()=>void act(async()=>setBrowser(await client.exitManual()))}>Завершить ручное управление</button>:<button disabled={pending||(active&&!paused)} onClick={()=>void connect()}>{ready?'Открыть Янг':'Подключить Янг'}</button>}
       </div></section>
       {manual&&browser?.generation&&<RemoteBrowser generation={browser.generation}/>}
-      <section className="run-toolbar" aria-label="Управление запуском"><div><span className="section-label">Новый запуск</span><p>Начнём с задания, открытого в Яндексе.</p></div><label className="limit-field">Заданий максимум<input type="number" min={1} max={50} value={Number.isNaN(limit)?'':limit} onChange={event=>setLimit(event.target.valueAsNumber)} disabled={pending||active}/></label><button className="primary" disabled={pending||!canStart} onClick={()=>void act(async()=>{const value=await client.startRun(limit);setView(value);setRunId(value.id);setBrowser(await client.browser());})}>Начать</button></section>
-      {view?<section className="run-card"><header className="run-heading"><div><span className={`status-pill ${view.status==='UNKNOWN'||view.status==='FAILED'?'warning':''}`}>{statusLabels[view.status]}</span><span className="progress-label">Отправлено {view.processed} из {view.maxTasks}</span></div>{activeStatuses.has(view.status)&&<button className="stop-button" disabled={pending} onClick={()=>void act(async()=>{setView(await client.stop(view.id));setBrowser(await client.browser());})}>Стоп</button>}</header>
-        <progress max={view.maxTasks} value={view.processed} aria-label="Прогресс запуска"/>
+      {selection?<SelectionPanel catalogue={catalogue} selection={selection} onChange={value=>{setSelection(value);setSaved(false);}} onSave={()=>void save()} onRefresh={()=>void act(async()=>setCatalogue(await client.refreshCatalogue()))} busy={pending} canRefresh={Boolean(ready&&!active&&!manual)} valid={validSelection} saved={saved} active={active}/>:<p role="status" className="notice">Загружаем настройки выбора…</p>}
+      <section className="run-toolbar" aria-label="Управление запуском"><div><span className="section-label">Новый запуск</span><p>После запуска ответы отправляются автоматически, целыми наборами.</p></div><label className="limit-field">Наборов максимум<input type="number" min={1} max={50} value={Number.isNaN(limit)?'':limit} onChange={event=>setLimit(event.target.valueAsNumber)} disabled={pending||active}/></label><button className="primary" disabled={pending||!canStart} onClick={()=>void start()}>Запустить</button></section>
+      {activeRun&&view?.id!==activeRun.id&&<button className="active-run-link" disabled={pending} onClick={()=>{revision.current++;setRunId(activeRun.id);setView(null);}}>Перейти к активному запуску</button>}
+      {view?<section className="run-card" aria-label="Состояние запуска"><header className="run-heading"><div><span className={`status-pill ${view.status==='UNKNOWN'||view.status==='FAILED'?'warning':''}`}>{statusLabels[view.status]}</span><span className="progress-label">Отправлено наборов: {view.processed} из {view.maxTasks}</span></div><div className="button-row">
+        {pausedStatuses.has(view.status)&&<button className="primary" disabled={pending||!ready} onClick={()=>void act(async()=>{if(manual)setBrowser(await client.exitManual());updateView(await client.resume(view.id));setBrowser(await client.browser());})}>Продолжить</button>}
+        {activeStatuses.has(view.status)&&<button className="stop-button" disabled={pending} onClick={()=>void act(async()=>{updateView(await client.stop(view.id));setBrowser(await client.browser());})}>Стоп</button>}
+      </div></header><progress max={view.maxTasks} value={view.processed} aria-label="Прогресс запуска"/>
+        {(view.selectedProject||view.selectionReason)&&<div className="selected-project">{view.selectedProject&&<h3>{view.selectedProject.title}</h3>}{view.selectionReason&&<p>{view.selectionReason}</p>}</div>}
+        {view.instructionProgress&&<div className="instruction-progress"><span>Обработано разделов и примеров: {view.instructionProgress.processed} из {view.instructionProgress.total}</span><span>AI-запросов на инструкцию: {view.instructionProgress.aiRequests}</span></div>}
         {view.error&&<p role="alert" className="notice error">{view.error.message}</p>}
-        {view.status==='UNKNOWN'&&<p className="notice error">Проверьте результат в Яндексе вручную. Приложение не будет повторно отправлять это задание.</p>}
-        {view.current&&view.status==='AWAITING_CONFIRMATION'?<ReviewPanel key={`${view.current.taskId}:${view.current.snapshotHash}:${view.current.confirmationNonce}`} task={view.current} runId={view.id} busy={pending} onConfirm={optionId=>act(async()=>{const task=view.current!;setView(await client.confirm(view.id,{requestId:newRequestId(),taskId:task.taskId,snapshotHash:task.snapshotHash,instructionHash:task.instruction.hash,optionId,confirmationNonce:task.confirmationNonce}));})}/>:<div className="run-message" role="status">{view.status==='PREPARING'?'Читаем полную инструкцию и загружаем материалы…':view.status==='ANALYZING'?'Ожидаем очередь и анализ модели. Ответ ещё не отправлен.':view.status==='SUBMITTING'?'Проверяем результат в Яндексе. Повторная отправка недоступна.':`Запуск ${statusLabels[view.status].toLowerCase()}. Отправлено ответов: ${view.processed}.`}</div>}
-        {view.results.length>0&&<div className="results"><h3>Результаты</h3><table><thead><tr><th>№</th><th>Задание</th><th>Статус</th></tr></thead><tbody>{view.results.map(item=><tr key={`${item.ordinal}-${item.taskId}`}><td>{item.ordinal}</td><td>{item.taskId}</td><td>{item.status==='SUBMITTED'?'Отправлено':item.status==='UNKNOWN'?'Результат неизвестен':item.status==='SUBMIT_INTENT'?'Отправка начата':item.status==='FAILED'?'Ошибка':'Подготовлено'}{item.code&&<small>{item.code}</small>}</td></tr>)}</tbody></table></div>}
-      </section>:<section className="empty-state"><div className="empty-symbol" aria-hidden="true">↗</div><h2>{runId?'Загружаем запуск…':'Подготовьте первое задание'}</h2><p>Откройте браузер, войдите в Яндекс и выберите проект.<br/>Мы прочитаем инструкцию и предложим ответ.</p><div className="flow"><span>01 · Инструкция</span><span>02 · Материал</span><span>03 · Подтверждение</span></div></section>}
-      <footer className="page-footer">Каждый ответ отправляется после вашего подтверждения. «Стоп» прекращает следующие действия.</footer>
+        {view.status==='UNKNOWN'&&<p className="notice error">Проверьте результат в Янг вручную. Приложение не будет повторно отправлять этот набор.</p>}
+        <div className="run-message" role="status">{runMessages[view.status]??`Запуск ${statusLabels[view.status].toLowerCase()}. Отправлено наборов: ${view.processed}.`}</div>
+        {view.current&&<TaskSetPanel key={`${view.current.suiteId}:${view.current.snapshotHash}`} task={view.current} runId={view.id}/>}
+        {view.results.length>0&&<div className="results"><h3>Результаты наборов</h3><table><thead><tr><th>№</th><th>Проект / набор</th><th>Статус</th></tr></thead><tbody>{view.results.map(item=><tr key={`${item.ordinal}-${item.poolId}-${item.suiteId}`}><td>{item.ordinal}</td><td>{item.poolId}<small>{item.suiteId}</small></td><td>{resultLabels[item.status]}{item.code&&<small>{item.code}</small>}{item.answers&&<details><summary>Ответы: {item.answers.length}</summary><ul className="result-answers">{item.answers.map(answer=><li key={`${answer.partId}:${answer.fieldId}`}><span>{answer.partId} / {answer.fieldId}</span>: {Array.isArray(answer.value)?answer.value.join(', '):String(answer.value)}</li>)}</ul></details>}</td></tr>)}</tbody></table></div>}
+      </section>:<section className="empty-state"><div className="empty-symbol" aria-hidden="true">↗</div><h2>{runId?'Загружаем запуск…':'Подготовьте первый запуск'}</h2><p>Подключите Янг, выберите проект или критерии автовыбора.<br/>Перед выполнением проверим инструкцию и возможности модели.</p><div className="flow"><span>01 · Вход в Янг</span><span>02 · Выбор проекта</span><span>03 · Выполнение</span></div></section>}
+      <footer className="page-footer">Материалы обрабатываются на вашем сервере. «Стоп» прекращает следующие действия.</footer>
     </main>
   </div>;
 }

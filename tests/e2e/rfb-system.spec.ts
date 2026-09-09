@@ -15,9 +15,8 @@ test('insecure HTTP noVNC paints and reconnects; session ownership, automation a
   await page.goto('/');expect(await page.evaluate(()=>({secure:window.isSecureContext,host:location.hostname,protocol:location.protocol}))).toEqual({secure:false,host:'rfb-http.test',protocol:'http:'});
   await page.getByLabel('Логин',{exact:true}).fill('alice');await page.getByLabel('Пароль',{exact:true}).fill(process.env.SYSTEM_PASSWORD!);await page.getByRole('button',{name:'Войти',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Яндекс Янг',exact:true})).toBeVisible();
-  await page.getByRole('button',{name:'Открыть браузер',exact:true}).click();await expect(page.getByText('Браузер готов',{exact:true})).toBeVisible({timeout:30_000});
   const socketOpened=page.waitForEvent('websocket',socket=>socket.url().endsWith('/api/browser/view'));
-  await page.getByRole('button',{name:'Открыть Яндекс',exact:true}).click();await socketOpened;
+  await page.getByRole('button',{name:'Подключить Янг',exact:true}).click();await socketOpened;
   await expect(page.getByRole('region',{name:'Ваш браузер Яндекса'})).toContainText('Ручное управление',{timeout:20_000});
   await framebuffer(page);
   await page.screenshot({path:'artifacts/ui-rfb.png',fullPage:true});
@@ -40,11 +39,12 @@ test('insecure HTTP noVNC paints and reconnects; session ownership, automation a
     },process.env.SYSTEM_PASSWORD!);
     expect(result).toEqual({login:200,manual:409});
   }finally{await other.close();}
-  await page.getByLabel('Заданий максимум').fill('1');const closed=reconnected.waitForEvent('close');await page.getByRole('button',{name:'Начать',exact:true}).click();await closed;
-  await expect(page.locator('.remote-screen')).toHaveCount(0);await expect(page.getByRole('region',{name:'Полная инструкция'})).toBeVisible({timeout:20_000});
+  await page.getByLabel('Наборов максимум').fill('50');
+  await page.getByLabel('Автоматический выбор', {exact:true}).check();
+  const closed=reconnected.waitForEvent('close');await page.getByRole('button',{name:'Запустить',exact:true}).click();await closed;
+  await expect(page.locator('.remote-screen')).toHaveCount(0);
   await page.getByRole('button',{name:'Стоп',exact:true}).click();await expect(page.getByText('Остановлен',{exact:true})).toBeVisible();
-  await page.getByRole('button',{name:'Открыть браузер',exact:true}).click();await expect(page.getByText('Браузер готов',{exact:true})).toBeVisible({timeout:30_000});
-  const reopened=page.waitForEvent('websocket',event=>event.url().endsWith('/api/browser/view'));await page.getByRole('button',{name:'Открыть Яндекс',exact:true}).click();const second=await reopened;
+  const reopened=page.waitForEvent('websocket',event=>event.url().endsWith('/api/browser/view'));await page.getByRole('button',{name:/^(Подключить Янг|Открыть Янг)$/}).click();const second=await reopened;
   await expect(page.getByRole('region',{name:'Ваш браузер Яндекса'})).toContainText('Ручное управление',{timeout:20_000});const logoutClosed=second.waitForEvent('close');await page.getByRole('button',{name:'Выйти',exact:true}).click();await logoutClosed;
   await expect(page.getByRole('heading',{name:'Войти в BrowserSkills',exact:true})).toBeVisible();
 });

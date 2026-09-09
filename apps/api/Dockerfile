@@ -18,9 +18,11 @@ COPY --from=web /build/apps/web/dist ./src/main/resources/static
 RUN mvn -B -q -DskipTests package
 
 FROM eclipse-temurin:21-jre-jammy@sha256:eebd356ad7358b7094758e5787a6726f332917cfd56feab6457c56dab895cdbf
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home app && mkdir -p /data/materials /app/config && chown -R app:app /data/materials
 WORKDIR /app
 COPY --from=build /build/target/browserskills-api-0.1.0.jar /app/api.jar
+COPY ops/inference/quality-evidence.json /app/config/quality-evidence.json
+ENV API_MATERIALS_DIR=/data/materials API_QUALITY_EVIDENCE_PATH=/app/config/quality-evidence.json
 USER 10001
 EXPOSE 8080
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-Djava.io.tmpdir=/tmp", "-jar", "/app/api.jar"]

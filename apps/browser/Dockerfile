@@ -22,8 +22,8 @@ COPY --from=build /app/contracts ./contracts
 COPY --from=build /app/apps/browser ./apps/browser
 COPY tests/test-site ./tests/test-site
 COPY apps/browser/start.sh /usr/local/bin/browser-start
-RUN chmod 755 /usr/local/bin/browser-start && mkdir -p /data/profile /run/browser/media && chown -R pwuser:pwuser /data /run/browser
-ENV DISPLAY=:99 PORT=3000 RFB_PORT=5900 PROFILE_DIR=/data/profile MEDIA_DIR=/run/browser/media
+RUN chmod 755 /usr/local/bin/browser-start && mkdir -p /data/profile /data/media /run/browser && chown -R pwuser:pwuser /data /run/browser
+ENV DISPLAY=:99 PORT=3000 RFB_PORT=5900 PROFILE_DIR=/data/profile MEDIA_DIR=/data/media
 USER pwuser
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s CMD node -e "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

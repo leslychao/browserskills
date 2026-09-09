@@ -26,6 +26,10 @@ $invocation = Get-ModelEvaluationInvocation $DockerHost $ComposeFile (Get-Projec
 $dockerArguments = $invocation.Docker
 $corpus = (Resolve-Path -LiteralPath $CorpusDirectory).Path
 if (-not (Test-Path -LiteralPath (Join-Path $corpus 'corpus.json') -PathType Leaf)) { throw 'corpus.json is required.' }
+$corpusManifest = Get-Item -LiteralPath (Join-Path $corpus 'corpus.json')
+if ($corpusManifest.Length -gt 10MB) { throw 'Corpus manifest exceeds 10 MiB.' }
+$corpusDocument = Get-Content -LiteralPath $corpusManifest.FullName -Raw | ConvertFrom-Json
+if ($corpusDocument.schemaVersion -ne 2) { throw 'Generate a new v2 whole-set diagnostic corpus. Historical v1 corpora must remain unchanged.' }
 $files = @(Get-ChildItem -LiteralPath $corpus -Recurse -Force)
 if ($files.Count -gt 2000 -or (($files | Where-Object { -not $_.PSIsContainer } | Measure-Object Length -Sum).Sum -gt 128MB)) {
     throw 'Evaluation upload is bounded to 2000 entries and 128 MiB to fit the inference tmpfs.'
@@ -52,11 +56,15 @@ try {
     $report = & docker @dockerArguments exec $container cat "$temporary/result.json"
     if ($LASTEXITCODE -ne 0) { throw 'Evaluation failed before producing a complete measured report.' }
     $json = $report -join "`n"
-    $null = $json | ConvertFrom-Json
+    $result = $json | ConvertFrom-Json
+    if ($result.schemaVersion -ne 2 -or $result.source -ne 'direct-model-diagnostic' -or
+        $result.productionPipeline -ne $false -or $result.admissionEvidence -ne $false) {
+        throw 'The inference container did not return a v2 direct-model diagnostic report. Update the deployment before evaluating.'
+    }
     $file = [IO.File]::Open($output, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
     try { $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json + "`n"); $file.Write($bytes) } finally { $file.Dispose() }
-    if ($evaluationExit -ne 0) { throw "Model evaluation gates failed. Measured report: $output" }
-    Write-Output "Model evaluation gates passed for this corpus only: $output"
+    if ($evaluationExit -ne 0) { throw "Whole-set diagnostic criteria failed. This is not production admission evidence. Measured report: $output" }
+    Write-Output "Whole-set diagnostic criteria passed for this corpus only: $output. Production pipeline quality was not evaluated; no admission evidence was installed."
 }
 finally {
     # A generated fixed-prefix path inside this container's tmpfs; never a caller-selected deletion target.
