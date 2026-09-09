@@ -62,16 +62,14 @@ function Assert-Docker {
     if ($LASTEXITCODE -ne 0 -or $info -ne 'linux') { throw 'Docker Desktop must be running with the WSL2 Linux engine.' }
 }
 
-function New-ServerCertificate([Security.Cryptography.RSA]$Key, [Security.Cryptography.X509Certificates.X509Certificate2]$Ca,
-    [Net.IPAddress]$Ip, [DateTimeOffset]$Expiry) {
-    $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=$Ip", $Key,
-        [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-    $san.AddIpAddress($Ip)
-    $request.CertificateExtensions.Add($san.Build())
-    $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
-    $oids = [Security.Cryptography.OidCollection]::new()
-    $oids.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1')) | Out-Null
-    $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $true))
-    return $request.Create($Ca, [DateTimeOffset]::UtcNow.AddMinutes(-5), $Expiry, [Security.Cryptography.RandomNumberGenerator]::GetBytes(16))
+function Get-DeploymentOrigin {
+    $root=Get-ProjectRoot
+    $entries=@(Get-Content -LiteralPath (Join-Path $root '.env') | Where-Object { $_ -match '^BROWSERSKILLS_PUBLIC_ORIGIN=' })
+    if($entries.Count -ne 1){throw 'Exactly one BROWSERSKILLS_PUBLIC_ORIGIN is required in .env.'}
+    $origin=$entries[0] -replace '^BROWSERSKILLS_PUBLIC_ORIGIN=',''
+    $uri=[Uri]$origin
+    if($uri.Scheme -ne 'http' -or $uri.Port -ne 8080 -or $uri.UserInfo -or $uri.AbsolutePath -ne '/' -or $uri.Query -or $uri.Fragment){
+        throw 'Expected LAN HTTP origin on port 8080. Review migration of an existing deployment before starting it.'
+    }
+    return $origin
 }

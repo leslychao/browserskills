@@ -4,22 +4,22 @@
  */
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
-import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import { resolve, join } from 'node:path';
 
 const directory=resolve(process.argv[2]??'');
 if(!process.argv[2])throw new Error('Pass the protected remote deployment directory.');
 const credentials=JSON.parse(await readFile(join(directory,'operator-credentials.json'),'utf8'));
-const ca=await readFile(join(directory,'ca_cert.pem'));
 const origin=new URL(credentials.origin);
-assert.equal(origin.protocol,'https:');
+assert.equal(origin.protocol,'http:');
+assert.equal(origin.port,'8080');
 let cookie='';
-let sawSecureSession=false;
+let sawSession=false;
 const evidence={startedAtUtc:new Date().toISOString(),origin:origin.origin,passed:false};
 async function request(path,method='GET',body,headers={}){
   const serialized=body===undefined?undefined:JSON.stringify(body);
   return new Promise((done,reject)=>{
-    const request=httpsRequest(new URL(path,origin),{method,ca,rejectUnauthorized:true,timeout:10000,headers:{...(cookie?{Cookie:cookie}:{}),...(serialized?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(serialized)}:{}),...headers}},response=>{
+    const request=httpRequest(new URL(path,origin),{method,timeout:10000,headers:{...(cookie?{Cookie:cookie}:{}),...(serialized?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(serialized)}:{}),...headers}},response=>{
       const chunks=[];let length=0;
       response.on('data',chunk=>{length+=chunk.length;if(length>2*1024*1024){response.destroy(new Error('Response exceeded smoke limit.'));return;}chunks.push(chunk);});
       response.once('error',reject);
@@ -27,13 +27,14 @@ async function request(path,method='GET',body,headers={}){
         for(const value of response.headers['set-cookie']??[]){
           if(value.startsWith('BROWSERSKILLS_SESSION=')){
             cookie=value.split(';')[0];
-            sawSecureSession ||= /; Secure/i.test(value)&&/; HttpOnly/i.test(value)&&/SameSite=Lax/i.test(value);
+            assert(!/; Secure/i.test(value),'Explicit LAN HTTP deployment cannot issue a Secure-only session cookie.');
+            sawSession ||= /; HttpOnly/i.test(value)&&/SameSite=Lax/i.test(value);
           }
         }
         done({status:response.statusCode,body:Buffer.concat(chunks).toString('utf8'),headers:response.headers});
       });
     });
-    request.once('error',reject);request.once('timeout',()=>request.destroy(new Error('HTTPS timeout.')));request.end(serialized);
+    request.once('error',reject);request.once('timeout',()=>request.destroy(new Error('HTTP timeout.')));request.end(serialized);
   });
 }
 try{
@@ -54,14 +55,14 @@ try{
   const runs=await request('/api/runs');assert.equal(runs.status,200);
   const logoutCsrf=JSON.parse((await request('/api/auth/csrf')).body);
   assert.equal((await request('/api/auth/logout','POST',undefined,{[logoutCsrf.headerName]:logoutCsrf.token})).status,204);
-  assert.equal((await request('/api/me')).status,401);assert(sawSecureSession);
+  assert.equal((await request('/api/me')).status,401);assert(sawSession);
   evidence.passed=true;
-  evidence.checks={verifiedTls:true,embeddedWebAssets:true,privateReadiness:true,anonymous401:true,csrfRequired:true,login:true,sessionRotated:true,secureHttpOnlySameSite:true,authenticatedStatus:true,logout:true};
+  evidence.checks={lanHttp:true,embeddedWebAssets:true,privateReadiness:true,anonymous401:true,csrfRequired:true,login:true,sessionRotated:true,httpOnlySameSiteCookieWithoutSecure:true,authenticatedStatus:true,logout:true};
   evidence.browser={workerId:status.workerId,mode:status.mode,generation:status.generation};
   evidence.historyCount=JSON.parse(runs.body).length;
 }finally{
   credentials.password='';cookie='';
   evidence.finishedAtUtc=new Date().toISOString();
-  await writeFile(join(directory,'auth-smoke-result.json'),JSON.stringify(evidence,null,2)+'\n');
+  await writeFile(join(directory,'auth-http-smoke-result.json'),JSON.stringify(evidence,null,2)+'\n');
 }
-console.log('Remote HTTPS/API auth smoke passed: web assets, CSRF/session/login/status/logout. No remote browser navigation or Yandex operation was performed.');
+console.log('Remote LAN HTTP/API auth smoke passed: web assets, CSRF/session/login/status/logout. No remote browser navigation or Yandex operation was performed.');

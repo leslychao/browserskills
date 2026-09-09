@@ -21,29 +21,6 @@ function Invoke-RemoteDocker([string[]]$Arguments, [string]$InputText = '', [int
     return (Invoke-BoundedProcess docker (@('--host', $script:RemoteEndpoint) + $Arguments) $InputText $TimeoutSeconds).Out.Trim()
 }
 
-function Invoke-PrivateCaHttps([string]$Uri,[string]$CaFile,[int]$TimeoutSeconds=10) {
-    if(([Uri]$Uri).Scheme -ne 'https') {throw 'HTTPS is required.'}
-    $pem=[IO.File]::ReadAllText([IO.Path]::GetFullPath($CaFile))
-    $ca=[Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String(($pem -replace '-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s','')))
-    $handler=[Net.Http.SocketsHttpHandler]::new()
-    $policy=[Security.Cryptography.X509Certificates.X509ChainPolicy]::new()
-    $policy.TrustMode=[Security.Cryptography.X509Certificates.X509ChainTrustMode]::CustomRootTrust
-    $policy.CustomTrustStore.Add($ca)|Out-Null
-    # This private CA issues no CRL/OCSP endpoint. Trust-chain, serverAuth and host/IP
-    # validation remain enabled; no certificate callback or Windows-store change is used.
-    $policy.RevocationMode=[Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-    $policy.ApplicationPolicy.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))|Out-Null
-    $handler.SslOptions.CertificateChainPolicy=$policy
-    $client=[Net.Http.HttpClient]::new($handler)
-    $client.Timeout=[TimeSpan]::FromSeconds($TimeoutSeconds)
-    $client.MaxResponseContentBufferSize=65536
-    try {
-        $response=$client.GetAsync($Uri).GetAwaiter().GetResult()
-        try {$response.EnsureSuccessStatusCode()|Out-Null;return $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()}
-        finally {$response.Dispose()}
-    } finally {$client.Dispose();$ca.Dispose()}
-}
-
 function Send-DockerImages([string[]]$Images, [int]$TimeoutSeconds = 900) {
     # Use byte streams, not a PowerShell text pipeline or a plaintext secret-bearing image.
     $saveInfo = [Diagnostics.ProcessStartInfo]::new('docker')

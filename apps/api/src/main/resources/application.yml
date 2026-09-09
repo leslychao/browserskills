@@ -14,18 +14,16 @@ spring:
     enabled: true
 server:
   address: ${BROWSERSKILLS_BIND_ADDRESS:0.0.0.0}
-  port: ${BROWSERSKILLS_PORT:8443}
+  port: ${BROWSERSKILLS_PORT:8080}
   ssl:
-    enabled: true
-    certificate: ${BROWSERSKILLS_TLS_CERTIFICATE:/run/secrets/api_cert}
-    certificate-private-key: ${BROWSERSKILLS_TLS_PRIVATE_KEY:/run/secrets/api_key}
+    enabled: false
   servlet:
     session:
       timeout: 1h
       cookie:
         name: BROWSERSKILLS_SESSION
         http-only: true
-        secure: true
+        secure: false
         same-site: lax
       tracking-modes: cookie
   error:
@@ -45,7 +43,7 @@ logging:
     org.apache.hc: OFF
     jdk.httpclient: OFF
 api:
-  public-origin: ${BROWSERSKILLS_PUBLIC_ORIGIN:https://192.168.0.107:8443}
+  public-origin: ${BROWSERSKILLS_PUBLIC_ORIGIN:http://192.168.0.107:8080}
   inference-url: ${API_INFERENCE_URL:http://inference:8080}
   daily-quota: ${BROWSERSKILLS_DAILY_QUOTA:100}
   workers:

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { chromium, type BrowserContext } from 'playwright';
 import type { BrowserStatus, WorkerCommand } from '@browserskills/contracts';
-import { FixedAdapter, type TemplateProfile } from './adapter.js';
+import { FixedAdapter, YANDEX_START_URL, type TemplateProfile } from './adapter.js';
 import { MediaStore, sha256 } from './media.js';
 import { WorkerError } from './errors.js';
 
@@ -79,7 +79,7 @@ export class BrowserOwner extends EventEmitter {
         page.on('download',download=>void download.cancel().catch(()=>undefined));
         this.adapter=new FixedAdapter(page,this.media,this.options.profiles,{verificationTimeoutMs:this.options.verificationTimeoutMs});
         this.mode='IDLE';
-        await page.goto(this.options.startUrl??'https://tasks.yandex.ru/user',{waitUntil:'domcontentloaded'});
+        await page.goto(this.options.startUrl??YANDEX_START_URL,{waitUntil:'domcontentloaded'});
         return this.status();
       case 'ENTER_MANUAL':
         if(!this.context||this.mode==='CLOSED')throw new WorkerError('BROWSER_CLOSED');

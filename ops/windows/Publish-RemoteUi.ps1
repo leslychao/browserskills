@@ -5,6 +5,7 @@ param([Parameter(Mandatory)][string]$Directory)
 $directory=[IO.Path]::GetFullPath($Directory)
 $plan=Get-Content -LiteralPath (Join-Path $directory deployment.json) -Raw|ConvertFrom-Json -AsHashtable
 if($plan.project -ne 'browserskills' -or $plan.installId -notmatch '^[a-f0-9]{32}$') {throw 'Unexpected deployment identity.'}
+if(([Uri]$plan.origin).Scheme -ne 'http' -or ([Uri]$plan.origin).Port -ne 8080){throw 'This bootstrap requires the current LAN HTTP plan. Preserve an older deployment and migrate it explicitly.'}
 $script:RemoteEndpoint=$plan.endpoint
 $compose=Join-Path $directory compose.remote.json
 if((Get-FileHash -LiteralPath $compose).Hash.ToLowerInvariant() -ne $plan.composeSha256) {throw 'Prepared Compose hash changed; review and prepare again.'}
@@ -28,7 +29,7 @@ function Assert-Owned([string]$Kind,[string]$Name) {
 foreach($service in $config.services.Keys) {Assert-Owned container "browserskills-$service-1"|Out-Null}
 foreach($volume in $config.volumes.Values) {Assert-Owned volume $volume.name|Out-Null}
 foreach($network in $config.networks.Values) {Assert-Owned network $network.name|Out-Null}
-$published=Invoke-RemoteDocker @('ps','--filter','publish=8443','--format','{{.ID}}')
+$published=Invoke-RemoteDocker @('ps','--filter','publish=8080','--format','{{.ID}}')
 foreach($container in @($published -split '\r?\n'|Where-Object{$_})) {Assert-Owned container $container|Out-Null}
 Remote-Compose @('config','--quiet')|Out-Null
 $missing=@()
@@ -80,15 +81,14 @@ Write-Output 'Starting PostgreSQL, API and five isolated browser workers.'
 Remote-Compose @('up','-d','--no-build','postgres','api','browser-1','browser-2','browser-3','browser-4','browser-5')|Out-Null
 $healthy=$false
 foreach($attempt in 1..40) {
-    try {Invoke-PrivateCaHttps "$($plan.origin)/health/live" (Join-Path $directory ca_cert.pem) 3|Out-Null;$healthy=$true;break} catch {Start-Sleep -Seconds 2}
+    try {Invoke-WebRequest -Uri "$($plan.origin)/health/live" -TimeoutSec 3 -MaximumRedirection 0|Out-Null;$healthy=$true;break} catch {Start-Sleep -Seconds 2}
 }
-if(-not $healthy){throw 'Remote API has not passed verified HTTPS liveness; containers are preserved for diagnosis.'}
+if(-not $healthy){throw 'Remote API has not passed HTTP liveness; containers are preserved for diagnosis.'}
 $credentials=Get-Content -LiteralPath (Join-Path $directory operator-credentials.json) -Raw|ConvertFrom-Json
 $existing=Remote-Compose @('exec','-T','postgres','psql','-U','postgres','-d','browserskills','-Atc',"SELECT count(*) FROM users WHERE login='$($plan.login)'")
 if($existing.Trim() -eq '0') {Remote-Compose @('exec','-T','api','java','-jar','/app/api.jar','--spring.main.web-application-type=none','--spring.profiles.active=admin',"--create-user=$($plan.login)") ($credentials.password+"`n")|Out-Null}
 $credentials=$null
-$uri=[Uri]$plan.origin
-$readiness=Remote-Compose @('exec','-T','api','curl','--fail','--silent','--max-time','10','--connect-to',"$($uri.Host):8443:127.0.0.1:8443",'--cacert','/run/secrets/api_cert',"$($plan.origin)/health/ready")|ConvertFrom-Json -AsHashtable
+$readiness=Remote-Compose @('exec','-T','api','curl','--fail','--silent','--max-time','10','http://127.0.0.1:8080/health/ready')|ConvertFrom-Json -AsHashtable
 foreach($component in @('database','browser-1','browser-2','browser-3','browser-4','browser-5')) {if($readiness.components[$component] -ne 'UP'){throw "UI component $component is not ready."}}
 $evidence=[ordered]@{completedAtUtc=[DateTime]::UtcNow.ToString('o');endpoint=$plan.endpoint;origin=$plan.origin;installId=$plan.installId;images=$plan.images;readiness=$readiness;containers=@()}
 foreach($service in $config.services.Keys) {
@@ -103,6 +103,5 @@ foreach($service in $config.services.Keys) {
 }
 Write-Utf8 (Join-Path $directory deployment-result.json) ($evidence|ConvertTo-Json -Depth 15)
 Write-Output "UI deployment ready: $($plan.origin)"
-Write-Output "Public CA: $(Join-Path $directory ca_cert.pem)"
 Write-Output "Operator credentials remain protected: $(Join-Path $directory operator-credentials.json)"
 Write-Output 'Inference is intentionally absent at this stage; manual browser UI components were verified.'

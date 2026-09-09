@@ -9,7 +9,7 @@ async function change(api:APIRequestContext,path:string,data?:unknown){
 }
 async function login(page:Page,login:string){
   await page.goto('/');await page.getByLabel('Логин',{exact:true}).fill(login);await page.getByLabel('Пароль',{exact:true}).fill(process.env.SYSTEM_PASSWORD!);
-  await page.getByRole('button',{name:'Войти',exact:true}).click();await expect(page.getByRole('heading',{name:'Яндекс Задания',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Войти',exact:true}).click();await expect(page.getByRole('heading',{name:'Яндекс Янг',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Открыть браузер',exact:true}).click();await expect(page.getByText('Браузер готов',{exact:true})).toBeVisible({timeout:30_000});
 }
 async function view(api:APIRequestContext,id:string){const response=await api.get(`/api/runs/${id}`);expect(response.ok()).toBeTruthy();return RunViewSchema.parse(await response.json());}

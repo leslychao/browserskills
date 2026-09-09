@@ -16,7 +16,8 @@ export interface TemplateProfile {
 
 /** No authenticated template has been verified yet. Fixtures are deliberately absent here. */
 export const verifiedYandexProfiles: readonly TemplateProfile[] = [];
-export const YANDEX_ORIGIN = 'https://tasks.yandex.ru';
+export const YANDEX_ORIGIN = 'https://yang.yandex-team.ru';
+export const YANDEX_START_URL = `${YANDEX_ORIGIN}/?activeTab=all`;
 
 type RawBlock={type:'text';text:string}|{type:'image'|'audio';url:string;caption?:string};
 interface DomTask {

@@ -12,14 +12,14 @@ The source is formatted with google-java-format 1.35.0. The official Maven wrapp
 
 ## Configuration
 
-Production serves HTTPS on port 8443. Mount read-only secrets via `/run/secrets`:
+The agreed LAN deployment serves HTTP on port 8080. Certificate files are not required. Mount read-only secrets via `/run/secrets`:
 
-- `db_password`, `api_cert` and `api_key` (PEM certificate/private key).
+- `db_password`.
 - `worker_1_token` through `worker_5_token`; each token authorizes exactly its configured private worker.
 
-Environment variables: `BROWSERSKILLS_DB_URL`, `BROWSERSKILLS_DB_USERNAME`, `BROWSERSKILLS_PUBLIC_ORIGIN`, `API_WORKER_1_URL` through `API_WORKER_5_URL`, `API_INFERENCE_URL`, `API_MODEL_SHA256`, and optional `BROWSERSKILLS_DAILY_QUOTA` (100). Default workers are `http://browser-N:3000`; inference is `http://inference:8080`. See the Compose deployment for TLS, resource limits and model provenance.
+Environment variables: `BROWSERSKILLS_DB_URL`, `BROWSERSKILLS_DB_USERNAME`, `BROWSERSKILLS_PUBLIC_ORIGIN`, `API_WORKER_1_URL` through `API_WORKER_5_URL`, `API_INFERENCE_URL`, `API_MODEL_SHA256`, and optional `BROWSERSKILLS_DAILY_QUOTA` (100). Default workers are `http://browser-N:3000`; inference is `http://inference:8080`. See the Compose deployment for network isolation, resource limits and model provenance.
 
-For local tests, the explicit `dev` profile binds HTTP to `127.0.0.1:8080`. Override `server.port` and `api.public-origin` together when using another local port. Do not publish the dev profile on a LAN interface. Production cookie security stays enabled. No default user or password is provisioned.
+For local tests, the explicit `dev` profile binds HTTP to `127.0.0.1:8080`. Override `server.port` and `api.public-origin` together when using another local port. The production LAN cookie keeps HttpOnly and SameSite=Lax and omits Secure so browsers send it over the explicitly selected HTTP transport. No default user or password is provisioned.
 
 Account CLI, with the same database configuration as the service:
 

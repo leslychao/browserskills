@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, ClientError } from './api';
+import { run } from './test-fixtures';
 
 const json = (body: unknown, status=200) => new Response(JSON.stringify(body), {status,headers:{'Content-Type':'application/json'}});
 describe('session API client', () => {
+  it('starts a run with a UUID when the LAN browser has no crypto.randomUUID', async () => {
+    vi.stubGlobal('crypto', {getRandomValues:crypto.getRandomValues.bind(crypto)});
+    try {
+      const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json({token:'csrf',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(json(run));
+      await new ApiClient(request).startRun(3);
+      const body = JSON.parse(request.mock.calls[1][1]!.body as string);
+      expect(body.maxTasks).toBe(3);
+      expect(body.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it('gets a fresh CSRF token for each mutation and uses same-origin cookies', async () => {
     const request = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json({token:'first',headerName:'X-CSRF-TOKEN'})).mockResolvedValueOnce(json({id:'u',login:'demo'}))

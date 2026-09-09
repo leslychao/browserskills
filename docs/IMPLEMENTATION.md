@@ -1,6 +1,10 @@
 # Accepted implementation contract
 
-This document records the accepted server-only Yandex Tasks MVP (2026-09-09). No Electron, CSV, recorder, arbitrary-site workflows or Ollama remain in the final implementation.
+This document records the accepted server-only Yandex Yang MVP (2026-09-09). No Electron, CSV, recorder, arbitrary-site workflows or Ollama remain in the final implementation.
+
+Target correction (2026-09-09): the user identified `https://yang.yandex-team.ru/?activeTab=all` as the actual working site and confirmed its corporate `passport.yandex-team.ru` sign-in. This replaces the previously assumed `tasks.yandex.ru` target. OPEN and the production adapter origin must use Yang only. Existing task/instruction/media/confirmation constraints remain in force; template selectors must be verified on an authenticated Yang task. Earlier Tasks demo observations cannot establish Yang compatibility.
+
+Transport amendment (2026-09-09): the user explicitly selected ordinary HTTP on the LAN after declining client certificate installation. The canonical app origin is `http://192.168.0.107:8080`; this replaces the initial mandatory HTTPS deployment. Login, CSRF, session ownership and worker isolation remain required. The HTTP session cookie keeps HttpOnly/SameSite=Lax and omits Secure; no certificate installation or browser-security bypass is part of setup.
 
 ## Product
 
@@ -13,11 +17,11 @@ This document records the accepted server-only Yandex Tasks MVP (2026-09-09). No
 
 ## Architecture
 
-- apps/api: Spring Boot 4.1.1 / Java 21, Spring Security, JDBC, Flyway, PostgreSQL 17. Serves production React assets and HTTPS.
+- apps/api: Spring Boot 4.1.1 / Java 21, Spring Security, JDBC, Flyway, PostgreSQL 17. Serves production React assets and LAN HTTP.
 - apps/web: React 19 / TypeScript / Vite; noVNC and native audio player. Same origin session authentication; poll current run every second.
 - apps/browser: Node 24 / TypeScript / Playwright 1.63.0; fixed Yandex adapter, persistent Chromium, Xvfb/x11vnc and an authenticated WebSocket-to-RFB bridge. No general recorder.
 - inference: llama.cpp CUDA, Qwen2.5-Omni-7B converted from the official Apache-2.0 Qwen weights to Q4_K_M + Q8_0 mmproj. Text JSON output only; no Talker. One request at a time, 8192-token context, GPU language layers and CPU mmproj initially. Pin source revisions and hashes. Never claim actual .107 GPU performance from source or fixture tests.
-- Docker Compose on Windows via Docker Desktop WSL2. Fixed browser-1..5 services, separate profiles; no Docker socket. Only API HTTPS is published. Native Windows scripts prepare/check Docker deployment, not WinSW/native application services.
+- Docker Compose on Windows via Docker Desktop WSL2. Fixed browser-1..5 services, separate profiles; no Docker socket. Only API HTTP8080 is published. Native Windows scripts prepare/check Docker deployment, not WinSW/native application services.
 - PostgreSQL, models and five browser profiles use separate persistent volumes. Active instructions/media use bounded ephemeral storage and are removed at task/run completion. No raw media, credentials, cookies or request bodies in logs/history.
 
 ## Public HTTP contract
@@ -25,11 +29,11 @@ This document records the accepted server-only Yandex Tasks MVP (2026-09-09). No
 All JSON fields use camelCase. Dates use ISO-8601 UTC strings. Errors: {code, message}. Unknown/foreign resources must not disclose another owner's data.
 
 - GET /api/auth/csrf -> {token, headerName}; usable before login.
-- POST /api/auth/login {login,password} -> {id,login}; JSON login with session fixation protection, CSRF. HttpOnly Secure SameSite=Lax cookie; 1h absolute session lifetime. Sessions are in-memory, restart requires login.
+- POST /api/auth/login {login,password} -> {id,login}; JSON login with session fixation protection, CSRF. HttpOnly SameSite=Lax cookie, without Secure for the agreed LAN HTTP deployment; 1h absolute session lifetime. Sessions are in-memory, restart requires login.
 - POST /api/auth/logout -> 204; invalidate session and close its manual view/control.
 - GET /api/me -> {id,login,quota:{limit,used,remaining,resetsAt}}.
 - GET /api/browser -> BrowserStatus.
-- POST /api/browser -> BrowserStatus (open user's persistent browser on tasks.yandex.ru/user).
+- POST /api/browser -> BrowserStatus (open user's persistent browser on https://yang.yandex-team.ru/?activeTab=all).
 - POST /api/browser/manual-control -> BrowserStatus (exclusive authenticated session owner); DELETE same path releases it.
 - WS /api/browser/view -> binary RFB. Verify authenticated session, exact Origin and control lease; enforce expiry/revocation on existing connection. Client viewOnly is never an authorization control.
 - POST /api/runs {requestId,maxTasks} -> RunView, starts from current browser task. Close/revoke manual control before automation. requestId is idempotent per user; changed payload with same id is conflict.
@@ -95,8 +99,7 @@ HTTP bearer token from per-worker secret file. No arbitrary worker URL from publ
 - Test 50 unique confirmed sends, idempotent confirms, changed instructions, stale task rerenders, whole-task rejection, error/timeout after click, API/worker crashes, stop, login expiry, owner isolation and noVNC revocation.
 - Media tests: Range, cross-user access, bad audio, bounds, inaccessible instructions/examples, no silent clipping, instructions asking about speech vs background sound.
 - Model evaluation: labelled 25 text,25 image,25 speech,25 sound/prosody minimum; >=90% correct/category counting abstentions as unsolved. p95<=30s text/image,<=90s task audio<=60s excluding queue. Report real GPU/RAM usage and actual measured evidence; fixture/mock is not real model/site verification.
-- Live Yandex demo navigation and the complete image-classification instruction were inspected on 2026-09-09. The task route embeds https://iframe-tasks.yandex, whose body remained empty after a reload; no question/options or whole-submit-unit identity could be verified. No answer was submitted. Do not label synthetic selectors as verified live support. Final ready claim requires loaded, compatible real templates.
-- A separate search-query classification demo (pool5221474) also exposed its full instruction, while its task iframe remained empty. A second template therefore did not resolve the live-site verification blocker.
+- Historical investigation used Tasks image/search-query demos; this was superseded by the user's Yang correction. Those demos and their iframe domains do not define the Yang adapter. The actual Yang landing page and corporate sign-in were inspected; authenticated task/instruction boundaries still need verification. Final ready claim requires loaded, compatible Yang templates, never synthetic selectors labelled as live support.
 - Operations: start after Windows reboot, pinned image update, DB and stopped-profile backup/restore, explicit .107 preflight. Root coordinates final diff and requirement audit.
 
 ## Ownership

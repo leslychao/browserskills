@@ -99,7 +99,9 @@ try{
   });
   const diagnosticsPort=await listen(diagnostics);
   const apiPort=await freePort();const webPort=await freePort();
-  const environment:NodeJS.ProcessEnv={SPRING_DATASOURCE_URL:`jdbc:postgresql://127.0.0.1:${port}/browserskills`,SPRING_DATASOURCE_USERNAME:'postgres',SPRING_DATASOURCE_PASSWORD:password,API_INFERENCE_URL:`http://127.0.0.1:${modelPort}`,API_DEV_URL:`http://127.0.0.1:${apiPort}`};
+  // A non-localhost origin exercises ordinary LAN HTTP; only Chromium resolves this fixture name.
+  const publicOrigin=`http://${rfbMode?'rfb-http.test':'127.0.0.1'}:${webPort}`;
+  const environment:NodeJS.ProcessEnv={SPRING_DATASOURCE_URL:`jdbc:postgresql://127.0.0.1:${port}/browserskills`,SPRING_DATASOURCE_USERNAME:'postgres',SPRING_DATASOURCE_PASSWORD:password,API_INFERENCE_URL:`http://127.0.0.1:${modelPort}`,API_DEV_URL:`http://127.0.0.1:${apiPort}`,...(rfbMode?{__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:'rfb-http.test'}:{})};
   workerPorts.forEach((workerPort,index)=>{environment[`API_WORKER_${index+1}_URL`]=`http://127.0.0.1:${workerPort}`;environment[`worker_${index+1}_token`]=workerToken;});
   if(rfbMode){
     const entry=join(directory,'headed-worker.mjs');
@@ -114,13 +116,13 @@ try{
     if(!ready)throw new Error('Headed Docker worker did not become ready');
   }
   for(const login of ['alice','bob','carol','david','eve'])await command(java,['-jar',jar,'--spring.main.web-application-type=none','--spring.profiles.active=admin',`--create-user=${login}`],environment,password+'\n');
-  const api=child(java,['-jar',jar,'--spring.profiles.active=dev',`--server.port=${apiPort}`,`--api.public-origin=http://127.0.0.1:${webPort}`],environment);
+  const api=child(java,['-jar',jar,'--spring.profiles.active=dev',`--server.port=${apiPort}`,`--api.public-origin=${publicOrigin}`],environment);
   await waitHttp(`http://127.0.0.1:${apiPort}/health/live`,api);
   await command(process.execPath,['node_modules/vite/bin/vite.js','build','apps/web'],environment);
   const vite=child(process.execPath,['node_modules/vite/bin/vite.js','preview','apps/web','--host','127.0.0.1','--port',String(webPort),'--strictPort'],environment);
   await waitHttp(`http://127.0.0.1:${webPort}`,vite);
   process.stdout.write('Fixture system ready: real PostgreSQL + Spring + Chromium; stub model.\n');
-  const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_URL:`http://127.0.0.1:${webPort}`,SYSTEM_PASSWORD:password,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});
+  const test=child(process.execPath,['node_modules/@playwright/test/cli.js','test','-c','tests/e2e/system.config.ts'],{...environment,SYSTEM_RFB_MODE:rfbMode?'1':'0',SYSTEM_URL:publicOrigin,SYSTEM_PASSWORD:password,SYSTEM_DIAGNOSTICS_URL:`http://127.0.0.1:${diagnosticsPort}`,SYSTEM_DIAGNOSTICS_TOKEN:diagnosticToken});
   test.processHandle.stdout!.on('data',chunk=>process.stdout.write(chunk));test.processHandle.stderr!.on('data',chunk=>process.stderr.write(chunk));
   const deadline=setTimeout(()=>test.processHandle.kill(),240_000);
   process.exitCode=await test.done.finally(()=>clearTimeout(deadline));

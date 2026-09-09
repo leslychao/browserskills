@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ApiErrorSchema, BrowserStatusSchema, MeSchema, RunSummarySchema, RunViewSchema } from '@browserskills/contracts';
+import { newRequestId } from './request-id';
 
 export class ClientError extends Error {
   constructor(public readonly status:number,public readonly code:string,message:string){super(message);this.name='ClientError';}
@@ -34,7 +35,7 @@ export class ApiClient {
   exitManual(){return this.change('/api/browser/manual-control',BrowserStatusSchema,undefined,'DELETE');}
   runs(){return this.request('/api/runs',z.array(RunSummarySchema));}
   run(id:string){return this.request(`/api/runs/${encodeURIComponent(id)}`,RunViewSchema);}
-  startRun(maxTasks:number,requestId=crypto.randomUUID()){return this.change('/api/runs',RunViewSchema,{maxTasks,requestId});}
+  startRun(maxTasks:number,requestId=newRequestId()){return this.change('/api/runs',RunViewSchema,{maxTasks,requestId});}
   confirm(id:string,body:Confirmation){return this.change(`/api/runs/${encodeURIComponent(id)}/confirm`,RunViewSchema,body);}
   stop(id:string){return this.change(`/api/runs/${encodeURIComponent(id)}/stop`,RunViewSchema);}
 }

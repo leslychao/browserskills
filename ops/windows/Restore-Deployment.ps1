@@ -12,7 +12,7 @@ if (($manifest['schemaVersion'] -isnot [int] -and $manifest['schemaVersion'] -is
     throw 'Unsupported or unverified backup manifest: clean browser shutdown must have been verified before backup.'
 }
 $names = @('database.dump', 'profile-1.tar.gz', 'profile-2.tar.gz', 'profile-3.tar.gz', 'profile-4.tar.gz', 'profile-5.tar.gz', 'deployment.env')
-$names += @('postgres_password','db_password','api_cert','api_key','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token','ca_cert.pem','ca_private.key') | ForEach-Object { "secrets/$_" }
+$names += @('postgres_password','db_password','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token') | ForEach-Object { "secrets/$_" }
 foreach ($name in $names) {
     if ((Get-FileHash -LiteralPath (Join-Path $backup $name)).Hash.ToLowerInvariant() -ne $manifest.files[$name]) { throw "Backup checksum mismatch: $name" }
 }

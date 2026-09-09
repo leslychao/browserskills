@@ -37,11 +37,14 @@ services:
     cpus: 2
     pids_limit: 256
     tmpfs: ['/tmp:size=268435456,mode=1777']
-    ports: ['${BROWSERSKILLS_BIND_IP:-127.0.0.1}:8443:8443']
+    ports: ['${BROWSERSKILLS_BIND_IP:-127.0.0.1}:8080:8080']
     environment:
+      SERVER_PORT: '8080'
+      SERVER_SSL_ENABLED: 'false'
+      SERVER_SERVLET_SESSION_COOKIE_SECURE: 'false'
       BROWSERSKILLS_DB_URL: jdbc:postgresql://postgres:5432/browserskills
       BROWSERSKILLS_DB_USERNAME: browserskills
-      BROWSERSKILLS_PUBLIC_ORIGIN: ${BROWSERSKILLS_PUBLIC_ORIGIN:-https://127.0.0.1:8443}
+      BROWSERSKILLS_PUBLIC_ORIGIN: ${BROWSERSKILLS_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
       API_WORKER_1_URL: http://browser-1:3000
       API_WORKER_2_URL: http://browser-2:3000
       API_WORKER_3_URL: http://browser-3:3000
@@ -50,7 +53,7 @@ services:
       API_INFERENCE_URL: http://inference:8080
       API_MODEL_SHA256: ${API_MODEL_SHA256:-unverified}
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError
-    secrets: [db_password, api_cert, api_key, worker_1_token, worker_2_token, worker_3_token, worker_4_token, worker_5_token]
+    secrets: [db_password, worker_1_token, worker_2_token, worker_3_token, worker_4_token, worker_5_token]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, inference, worker1, worker2, worker3, worker4, worker5]
@@ -167,8 +170,6 @@ volumes:
 secrets:
   postgres_password: {file: ./secrets/postgres_password}
   db_password: {file: ./secrets/db_password}
-  api_cert: {file: ./secrets/api_cert}
-  api_key: {file: ./secrets/api_key}
   worker_1_token: {file: ./secrets/worker_1_token}
   worker_2_token: {file: ./secrets/worker_2_token}
   worker_3_token: {file: ./secrets/worker_3_token}

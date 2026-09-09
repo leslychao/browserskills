@@ -1,10 +1,11 @@
-import { describe,it,expect,vi } from 'vitest';
+import { afterEach,describe,it,expect,vi } from 'vitest';
 import { render,screen,fireEvent,waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from './App';
 import { ApiClient,ClientError } from './api';
 import { browserStatus,run,user } from './test-fixtures';
 vi.mock('./RemoteBrowser',()=>({RemoteBrowser:()=> <div>Экран браузера</div>}));
+afterEach(()=>vi.unstubAllGlobals());
 
 function clientMock(){
   return {me:vi.fn().mockResolvedValue(user),browser:vi.fn().mockResolvedValue(browserStatus),runs:vi.fn().mockResolvedValue([]),run:vi.fn().mockResolvedValue(run),login:vi.fn().mockResolvedValue({id:user.id,login:user.login}),logout:vi.fn().mockResolvedValue(undefined),openBrowser:vi.fn().mockResolvedValue(browserStatus),enterManual:vi.fn().mockResolvedValue({...browserStatus,mode:'MANUAL'}),exitManual:vi.fn().mockResolvedValue(browserStatus),startRun:vi.fn().mockResolvedValue(run),confirm:vi.fn().mockResolvedValue({...run,status:'SUBMITTING'}),stop:vi.fn().mockResolvedValue({...run,status:'STOPPED',current:null})};
@@ -18,7 +19,7 @@ describe('workspace behavior',()=>{
     await userEvent.type(screen.getByLabelText('Логин'),'tester');
     await userEvent.type(screen.getByLabelText('Пароль'),'password');
     await userEvent.click(screen.getByRole('button',{name:'Войти'}));
-    await screen.findByRole('heading',{name:'Яндекс Задания'});
+    await screen.findByRole('heading',{name:'Яндекс Янг'});
     expect(client.login).toHaveBeenCalledWith('tester','password');
     await userEvent.click(screen.getByRole('button',{name:'Выйти'}));
     await screen.findByRole('heading',{name:'Войти в BrowserSkills'});
@@ -38,6 +39,7 @@ describe('workspace behavior',()=>{
     expect(client.startRun).toHaveBeenCalledWith(3);
   });
   it('confirms only after click with the exact current task, instruction and nonce; allows stopping',async()=>{
+    vi.stubGlobal('crypto',{getRandomValues:crypto.getRandomValues.bind(crypto)});
     const client=clientMock();client.runs.mockResolvedValue([run]);
     show(client);
     await screen.findByRole('heading',{name:'Какой звук слышен на фоне?'});
@@ -84,6 +86,6 @@ describe('workspace behavior',()=>{
     const client=clientMock();client.me.mockRejectedValue(new ClientError(0,'NETWORK_ERROR','Сервер недоступен'));
     show(client);
     await screen.findByText('Сервер недоступен');
-    expect(screen.queryByRole('heading',{name:'Яндекс Задания'})).toBeNull();
+    expect(screen.queryByRole('heading',{name:'Яндекс Янг'})).toBeNull();
   });
 });

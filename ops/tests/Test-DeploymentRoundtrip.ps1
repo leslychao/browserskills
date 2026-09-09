@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 [CmdletBinding()]
 param(
-    [string]$ApiImage = 'browserskills-api:local',
+    [string]$ApiImage = 'browserskills-api:lan-http',
     [string]$BrowserImage = 'browserskills-browser:local',
     [string]$ProfileFixture = '.cache/profile-lifecycle.mjs'
 )
@@ -53,18 +53,6 @@ function New-TestSecrets([string]$Directory) {
     foreach ($name in @('postgres_password', 'db_password', 'worker_1_token', 'worker_2_token', 'worker_3_token', 'worker_4_token', 'worker_5_token')) {
         Write-Utf8 (Join-Path $Directory $name) ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
     }
-    $caKey = [Security.Cryptography.RSA]::Create(3072); $key = [Security.Cryptography.RSA]::Create(3072)
-    try {
-        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=Disposable roundtrip CA', $caKey, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
-        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
-        $ca = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddDays(2))
-        $cert = New-ServerCertificate $key $ca ([Net.IPAddress]::Loopback) ([DateTimeOffset]::UtcNow.AddDays(1))
-        Write-Utf8 (Join-Path $Directory api_cert) ($cert.ExportCertificatePem() + "`n" + $ca.ExportCertificatePem())
-        Write-Utf8 (Join-Path $Directory api_key) $key.ExportPkcs8PrivateKeyPem()
-        Write-Utf8 (Join-Path $Directory ca_cert.pem) $ca.ExportCertificatePem()
-        Write-Utf8 (Join-Path $Directory ca_private.key) $caKey.ExportPkcs8PrivateKeyPem()
-        $cert.Dispose(); $ca.Dispose()
-    } finally { $key.Dispose(); $caKey.Dispose() }
 }
 function New-TestProject([string]$Suffix, [string]$SecretsFrom = '') {
     $root = Join-Path $testRoot $Suffix
@@ -79,7 +67,7 @@ function New-TestProject([string]$Suffix, [string]$SecretsFrom = '') {
     Copy-Item -LiteralPath (Join-Path $repository ops/seccomp-profile.json) -Destination (Join-Path $root ops/seccomp-profile.json)
     if ($SecretsFrom) { Copy-Item -LiteralPath $SecretsFrom -Destination (Join-Path $root secrets) -Recurse; Set-ProtectedDirectory (Join-Path $root secrets) }
     else { New-TestSecrets (Join-Path $root secrets) }
-    Write-Utf8 (Join-Path $root .env) "BROWSERSKILLS_RELEASE=local`nBROWSERSKILLS_BIND_IP=127.0.0.1`nBROWSERSKILLS_PUBLIC_ORIGIN=https://127.0.0.1:8443`n"
+    Write-Utf8 (Join-Path $root .env) "BROWSERSKILLS_RELEASE=local`nBROWSERSKILLS_BIND_IP=127.0.0.1`nBROWSERSKILLS_PUBLIC_ORIGIN=http://127.0.0.1:8080`n"
     Copy-Item -LiteralPath (Join-Path $repository compose.yaml) -Destination (Join-Path $root compose.yaml)
     $config = (Run docker @('compose', '--project-directory', $root, '-f', (Join-Path $root compose.yaml), '-p', "$id-$Suffix", 'config', '--format', 'json')).Out | ConvertFrom-Json -AsHashtable
     # Docker Compose accepts split inline YAML items such as "mode=1777", but Docker
@@ -111,11 +99,11 @@ function New-TestProject([string]$Suffix, [string]$SecretsFrom = '') {
 }
 function Wait-Api([string]$Root) {
     foreach ($attempt in 1..60) {
-        $result = Run docker @('compose', '--project-directory', $Root, '-f', (Join-Path $Root compose.yaml), 'exec', '-T', 'api', 'curl', '--fail', '--silent', '--max-time', '2', '--cacert', '/run/secrets/api_cert', 'https://127.0.0.1:8443/health/live') -AllowFailure
+        $result = Run docker @('compose', '--project-directory', $Root, '-f', (Join-Path $Root compose.yaml), 'exec', '-T', 'api', 'curl', '--fail', '--silent', '--max-time', '2', 'http://127.0.0.1:8080/health/live') -AllowFailure
         if ($result.Code -eq 0) { return }
         Start-Sleep -Seconds 1
     }
-    throw 'Actual HTTPS API did not start within bounded readiness wait.'
+    throw 'Actual HTTP API did not start within bounded readiness wait.'
 }
 function Profile-Evidence([string]$Root) {
     $all = @()
@@ -177,7 +165,7 @@ try {
     foreach ($file in @('compose.yaml', 'ops/windows/Common.ps1', 'ops/windows/Backup-Deployment.ps1', 'ops/windows/Restore-Deployment.ps1', 'ops/tests/Test-DeploymentRoundtrip.ps1', 'apps/browser/start.sh', 'apps/browser/test/profile-lifecycle.ts', $ProfileFixture)) {
         $report.fileSha256[$file] = (Get-FileHash -LiteralPath (Join-Path $repository $file)).Hash.ToLowerInvariant()
     }
-    Write-Output 'Starting isolated PostgreSQL and production HTTPS API; applying real Flyway migrations.'
+    Write-Output 'Starting isolated PostgreSQL and production HTTP API; applying real Flyway migrations.'
     $source = New-TestProject source
     Dc $source @('up', '-d', '--no-build', 'postgres', 'api') | Out-Null
     Wait-Api $source

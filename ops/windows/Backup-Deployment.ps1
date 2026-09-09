@@ -43,7 +43,7 @@ foreach ($number in 1..5) {
 Copy-Item -LiteralPath (Join-Path $root secrets) -Destination (Join-Path $destinationPath secrets) -Recurse
 Copy-Item -LiteralPath (Join-Path $root '.env') -Destination (Join-Path $destinationPath deployment.env)
 $files = @('database.dump', 'profile-1.tar.gz', 'profile-2.tar.gz', 'profile-3.tar.gz', 'profile-4.tar.gz', 'profile-5.tar.gz', 'deployment.env')
-$files += @('postgres_password','db_password','api_cert','api_key','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token','ca_cert.pem','ca_private.key') | ForEach-Object { "secrets/$_" }
+$files += @('postgres_password','db_password','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token') | ForEach-Object { "secrets/$_" }
 $hashes = @{}
 foreach ($file in $files) { $hashes[$file] = (Get-FileHash -LiteralPath (Join-Path $destinationPath $file)).Hash.ToLowerInvariant() }
 Write-Utf8 (Join-Path $destinationPath 'backup.json') (@{schemaVersion=1; createdAtUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes; profilesStopped=$true; profilesVerifiedClean=$true} | ConvertTo-Json -Depth 5)

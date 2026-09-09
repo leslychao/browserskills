@@ -22,5 +22,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 COPY --from=build /build/target/browserskills-api-0.1.0.jar /app/api.jar
 USER 10001
-EXPOSE 8443
+EXPOSE 8080
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-Djava.io.tmpdir=/tmp", "-jar", "/app/api.jar"]

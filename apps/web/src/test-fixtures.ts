@@ -1,6 +1,6 @@
 import type { BrowserStatus, Me, ReviewTask, RunView } from '@browserskills/contracts';
 export const user:Me={id:'30000000-0000-4000-8000-000000000001',login:'tester',quota:{limit:100,used:1,remaining:99,resetsAt:'2026-09-10T00:00:00Z'}};
-export const browserStatus:BrowserStatus={workerId:'browser-1',generation:'generation-1',mode:'IDLE',url:'https://tasks.yandex.ru/task',runId:null};
+export const browserStatus:BrowserStatus={workerId:'browser-1',generation:'generation-1',mode:'IDLE',url:'https://yang.yandex-team.ru/?activeTab=all',runId:null};
 export const reviewTask:ReviewTask={
   projectId:'project-1',taskId:'task-1',question:'Какой звук слышен на фоне?',
   instruction:{sourceKey:'project-1/instruction',hash:'a'.repeat(64),blocks:[{type:'text',text:'Определите фоновый звук. Не учитывайте речь человека.\nПример: звук сирены → «Сирена».'}]},

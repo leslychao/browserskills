@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([string]$ServerIp='192.168.0.107', [string]$Endpoint='tcp://192.168.0.107:2375', [string]$ApiImage='browserskills-api:local', [string]$BrowserImage='browserskills-browser:local', [string]$Login='vitalii')
+param([string]$ServerIp='192.168.0.107', [string]$Endpoint='tcp://192.168.0.107:2375', [string]$ApiImage='browserskills-api:lan-http', [string]$BrowserImage='browserskills-browser:local', [string]$Login='vitalii')
 . "$PSScriptRoot/Remote-Common.ps1"
 if ($Login -notmatch '^[a-zA-Z0-9_.-]{3,64}$') { throw 'Invalid operator login.' }
 $ip=[Net.IPAddress]::Parse($ServerIp)
@@ -14,20 +14,7 @@ Set-ProtectedDirectory $secretDirectory
 foreach($name in @('postgres_password','db_password','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token')) {
     Write-Utf8 (Join-Path $secretDirectory $name) ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant())
 }
-$caKey=[Security.Cryptography.RSA]::Create(3072); $key=[Security.Cryptography.RSA]::Create(3072)
-try {
-    $request=[Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=BrowserSkills private CA', $caKey, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true,$false,0,$true))
-    $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign -bor [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::CrlSign,$true))
-    $ca=$request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddYears(5))
-    $cert=New-ServerCertificate $key $ca $ip ([DateTimeOffset]::UtcNow.AddDays(365))
-    Write-Utf8 (Join-Path $secretDirectory api_cert) ($cert.ExportCertificatePem()+"`n"+$ca.ExportCertificatePem())
-    Write-Utf8 (Join-Path $secretDirectory api_key) $key.ExportPkcs8PrivateKeyPem()
-    Write-Utf8 (Join-Path $secretDirectory ca_private.key) $caKey.ExportPkcs8PrivateKeyPem()
-    Write-Utf8 (Join-Path $directory ca_cert.pem) $ca.ExportCertificatePem()
-    $cert.Dispose(); $ca.Dispose()
-} finally {$key.Dispose();$caKey.Dispose()}
-$origin="https://${ServerIp}:8443"
+$origin="http://${ServerIp}:8080"
 $credentials=@{login=$Login;password=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24));origin=$origin}
 Write-Utf8 (Join-Path $directory operator-credentials.json) ($credentials|ConvertTo-Json)
 $credentials=$null
@@ -39,7 +26,10 @@ $images=@{}
 foreach($image in @($ApiImage,$BrowserImage)) { $images[$image]=(Invoke-BoundedProcess docker @('image','inspect',$image,'--format','{{.Id}}')).Out.Trim() }
 $config.services.api.image=$images[$ApiImage]
 $config.services.api.environment.BROWSERSKILLS_PUBLIC_ORIGIN=$origin
-$config.services.api.ports=@(@{target=8443;published='8443';host_ip=$ServerIp;protocol='tcp';mode='ingress'})
+$config.services.api.environment.SERVER_PORT='8080'
+$config.services.api.environment.SERVER_SSL_ENABLED='false'
+$config.services.api.environment.SERVER_SERVLET_SESSION_COOKIE_SECURE='false'
+$config.services.api.ports=@(@{target=8080;published='8080';host_ip=$ServerIp;protocol='tcp';mode='ingress'})
 foreach($service in $config.services.Values) { $service.Remove('build');$service.Remove('secrets');$service.pull_policy='never';$service.labels=@{'browserskills.install-id'=$installId;'browserskills.managed'='remote-ui'} }
 $seccompPath=Join-Path $directory seccomp-profile.json
 Copy-Item -LiteralPath (Join-Path $repository ops/seccomp-profile.json) -Destination $seccompPath
@@ -56,7 +46,7 @@ function Add-Payload([string]$Volume,[int]$Uid,[hashtable]$Files,[bool]$Executab
     $config.volumes[$Volume]=@{name=$Volume;external=$true}
 }
 $apiFiles=@{}
-foreach($name in @('db_password','api_cert','api_key','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token')) { $apiFiles[$name]=Join-Path $secretDirectory $name }
+foreach($name in @('db_password','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token')) { $apiFiles[$name]=Join-Path $secretDirectory $name }
 Add-Payload browserskills_api_secrets 10001 $apiFiles
 $config.services.api.volumes=@(@{type='volume';source='browserskills_api_secrets';target='/run/secrets';read_only=$true;volume=@{nocopy=$true}})
 Add-Payload browserskills_postgres_secrets 999 @{postgres_password=(Join-Path $secretDirectory postgres_password);db_password=(Join-Path $secretDirectory db_password)}
@@ -90,6 +80,5 @@ foreach($item in @((Get-Item -LiteralPath $directory))+@(Get-ChildItem -LiteralP
     }
 }
 Write-Output "Prepared local deployment: $directory"
-Write-Output "Public CA: $(Join-Path $directory ca_cert.pem)"
 Write-Output "Operator credentials: $(Join-Path $directory operator-credentials.json)"
 Write-Output 'No remote resources were changed. Publish-RemoteUi.ps1 performs the reviewed deployment.'
