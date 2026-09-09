@@ -104,7 +104,7 @@
     "mmproj": "Q8_0",
     "context": 8192,
     "cudaArchitecture": 86,
-    "conversionRequirementsSha256": "a29345f31ba49607f47a948d63ff9c994d120eb8e5e5d33dfa166837d2611f8b"
+    "conversionRequirementsSha256": "666b8c76039915ed177e5dacefd763b87c9de2d247da4f9a145bc28121603698"
   },
   "evidence": "Official HuggingFace LFS SHA256 for large files; downloaded SHA256 for small files and source archive on 2026-09-09. Converted artifact hashes are generated from actual outputs by prepare_model.py."
 }

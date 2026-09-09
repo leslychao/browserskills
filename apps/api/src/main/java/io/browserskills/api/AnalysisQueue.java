@@ -5,6 +5,7 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -22,9 +23,8 @@ public class AnalysisQueue {
           Thread.ofPlatform().name("inference-", 0).factory(),
           new ThreadPoolExecutor.AbortPolicy());
   private final Set<UUID> queued = ConcurrentHashMap.newKeySet();
-  private final ScheduledExecutorService deadlines =
-      Executors.newSingleThreadScheduledExecutor(
-          Thread.ofPlatform().name("analysis-deadlines").factory());
+  private final ScheduledThreadPoolExecutor deadlines =
+      new ScheduledThreadPoolExecutor(1, Thread.ofPlatform().name("analysis-deadlines").factory());
   private final Store store;
   private final InferenceClient model;
   private final JsonMapper json;
@@ -42,6 +42,7 @@ public class AnalysisQueue {
     this.json = json;
     this.clock = clock;
     this.modelHash = modelHash;
+    deadlines.setRemoveOnCancelPolicy(true);
   }
 
   public void submit(
@@ -57,9 +58,12 @@ public class AnalysisQueue {
     Instant queuedAt = clock.instant();
     AtomicBoolean claimed = new AtomicBoolean();
     AtomicBoolean expired = new AtomicBoolean();
+    AtomicReference<ScheduledFuture<?>> alarmReference = new AtomicReference<>();
     Runnable task =
         () -> {
           if (!claimed.compareAndSet(false, true) || expired.get()) return;
+          var alarm = alarmReference.get();
+          if (alarm != null) alarm.cancel(false);
           execute(user, run, current, callback, queuedAt);
         };
     Instant deadline = queuedAt.plusSeconds(120);
@@ -81,13 +85,16 @@ public class AnalysisQueue {
             },
             Math.max(0, Duration.between(queuedAt, deadline).toMillis()),
             TimeUnit.MILLISECONDS);
+    alarmReference.set(alarm);
     try {
       executor.execute(task);
     } catch (RejectedExecutionException e) {
       alarm.cancel(false);
-      queued.remove(user);
-      callback.accept(
-          null, new Contracts.ApiError("AI_BUSY", "Analysis queue is full. Select manually."));
+      if (claimed.compareAndSet(false, true)) {
+        queued.remove(user);
+        callback.accept(
+            null, new Contracts.ApiError("AI_BUSY", "Analysis queue is full. Select manually."));
+      }
     }
   }
 

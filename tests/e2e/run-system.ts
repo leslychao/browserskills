@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, access, writeFile } from 'node:fs/promises';
+import { mkdir, access, writeFile,copyFile,unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
 import { build } from 'esbuild';
@@ -23,8 +23,9 @@ const workerToken=randomBytes(32).toString('hex');
 const diagnosticToken=randomBytes(32).toString('hex');
 const container=`browserskills-system-${randomUUID()}`;
 const java=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin',process.platform==='win32'?'java.exe':'java'):'java';
-const jar=resolve(process.env.API_TEST_JAR??'apps/api/target/browserskills-api-0.1.0.jar');
-await access(jar);
+const sourceJar=resolve(process.env.API_TEST_JAR??'apps/api/target/browserskills-api-0.1.0.jar');
+await access(sourceJar);
+const jar=join(directory,'api.jar');await copyFile(sourceJar,jar);
 
 function child(command:string,args:string[],env:NodeJS.ProcessEnv={},input?:string){
   const processHandle=spawn(command,args,{cwd:root,env:{...process.env,...env},windowsHide:true,stdio:['pipe','pipe','pipe']});
@@ -68,7 +69,7 @@ try{
   }
   if(!dbReady)throw new Error('PostgreSQL readiness timed out');
 
-  const sites=[];
+  const sites:Array<Awaited<ReturnType<typeof startTestSite>>>=[];
   const workerPorts=[];
   for(const [index,mode] of (['normal','lost','image','audio','instruction-audio'] as const).entries()){
     const fixture=await startTestSite(mode);sites.push(fixture);cleanup.push(fixture.close);
@@ -78,12 +79,18 @@ try{
   }
   let analyses=0;let incompleteInstructions=0;let audioAnalyses=0;
   const model=createServer(async(request,response)=>{
+    if(request.method==='GET'&&request.url==='/health'){response.setHeader('Content-Type','application/json');response.end(JSON.stringify({status:'ok'}));return;}
+    if(request.method!=='POST'||request.url!=='/v1/chat/completions'){response.writeHead(404);response.end();return;}
     let source='';for await(const chunk of request){source+=chunk;if(source.length>8*1024*1024){response.writeHead(413);response.end();return;}}
     const payload=JSON.parse(source);analyses++;
     const material=JSON.stringify(payload.messages);
     if(material.includes('"type":"input_audio"'))audioAnalyses++;
     if(!material.includes('Read the whole question.')||!material.includes('Example: sky'))incompleteInstructions++;
-    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({decision:'ANSWER',optionId:'blue'})}}]}));
+    const optionBlock=payload.messages[1].content.findLast((part:{type:string;text?:string})=>part.type==='text'&&part.text?.startsWith('AVAILABLE OPTIONS:\n'));
+    const options=JSON.parse(optionBlock.text.slice('AVAILABLE OPTIONS:\n'.length)) as Array<{id:string;label:string}>;
+    const answer=options.find(option=>option.label==='Blue');
+    if(!answer){response.writeHead(422);response.end();return;}
+    response.setHeader('Content-Type','application/json');response.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({decision:'ANSWER',optionId:answer.id})}}]}));
   });
   const modelPort=await listen(model);
   const diagnostics=createServer((request,response)=>{
@@ -98,7 +105,7 @@ try{
     const entry=join(directory,'headed-worker.mjs');
     await build({entryPoints:['tests/test-site/worker.ts'],bundle:true,platform:'node',format:'esm',packages:'external',outfile:entry});
     const name=`browserskills-rfb-system-${randomUUID()}`;
-    await command('docker',['run','--detach','--rm','--init','--name',name,'--cap-drop=ALL','--security-opt','no-new-privileges','--security-opt',`seccomp=${resolve('ops/seccomp-profile.json')}`,'--shm-size=1g','--publish','127.0.0.1::3000','--mount',`type=bind,source=${entry},target=/app/tests/fixture-worker.mjs,readonly`,'--mount',`type=bind,source=${resolve('tests/test-site')},target=/app/tests/test-site,readonly`,'--env','FIXTURE_WORKER_TOKEN','--env','FIXTURE_WORKER_PORT=3000','--env','FIXTURE_WORKER_ID=browser-1','--entrypoint','/bin/bash',process.env.SYSTEM_RFB_IMAGE??'browserskills-browser:local','/app/tests/test-site/start-worker.sh'],{FIXTURE_WORKER_TOKEN:workerToken});
+    await command('docker',['run','--detach','--rm','--init','--name',name,'--read-only','--cap-drop=ALL','--security-opt','no-new-privileges','--security-opt',`seccomp=${resolve('ops/seccomp-profile.json')}`,'--shm-size=1g','--tmpfs','/tmp:size=268435456,mode=1777','--tmpfs','/run/browser:size=268435456,uid=1001,gid=1001,mode=0700','--publish','127.0.0.1::3000','--mount',`type=bind,source=${entry},target=/app/apps/browser/dist/main.js,readonly`,'--mount',`type=bind,source=${resolve('tests/test-site')},target=/app/tests/test-site,readonly`,'--env','FIXTURE_WORKER_TOKEN','--env','FIXTURE_WORKER_PORT=3000','--env','FIXTURE_WORKER_ID=browser-1','--entrypoint','/bin/bash',process.env.SYSTEM_RFB_IMAGE??'browserskills-browser:local','/app/tests/test-site/start-worker.sh'],{FIXTURE_WORKER_TOKEN:workerToken});
     cleanup.push(()=>command('docker',['rm','--force',name]));
     const headedPort=(await command('docker',['port',name,'3000/tcp'])).split(':').at(-1)!;
     environment.API_WORKER_1_URL=`http://127.0.0.1:${headedPort}`;
@@ -121,4 +128,5 @@ try{
 }finally{
   for(const running of children.toReversed())if(running.exitCode===null)running.kill();
   for(const close of cleanup.toReversed())try{await close();}catch(error){process.stderr.write(`Fixture cleanup: ${error instanceof Error?error.message:'failed'}\n`);}
+  await unlink(jar).catch(()=>undefined);
 }

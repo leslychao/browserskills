@@ -34,9 +34,14 @@ public class AccountCli implements ApplicationRunner {
       else {
         byte[] input = System.in.readNBytes(75);
         if (input.length > 74) throw new IllegalArgumentException("Password is too long.");
-        String line = StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(input)).toString();
-        if(line.endsWith("\n"))line=line.substring(0,line.length()-1);
-        if(line.endsWith("\r"))line=line.substring(0,line.length()-1);
+        String line =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(input))
+                .toString();
+        if (line.endsWith("\n")) line = line.substring(0, line.length() - 1);
+        if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
         password = line.toCharArray();
         Arrays.fill(input, (byte) 0);
       }

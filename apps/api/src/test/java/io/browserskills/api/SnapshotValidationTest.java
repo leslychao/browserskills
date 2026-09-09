@@ -29,18 +29,24 @@ class SnapshotValidationTest {
     assertEquals(
         "a",
         SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"optionId\":\"a\"}", snapshot("1"), Json.mapper())
+                "{\"decision\":\"ANSWER\",\"optionId\":\"a\"}",
+                snapshot("1").options(),
+                Json.mapper())
             .optionId());
     assertThrows(
         ApiException.class,
         () ->
             SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"optionId\":\"x\"}", snapshot("1"), Json.mapper()));
+                "{\"decision\":\"ANSWER\",\"optionId\":\"x\"}",
+                snapshot("1").options(),
+                Json.mapper()));
     assertThrows(
         ApiException.class,
         () ->
             SnapshotValidation.decision(
-                "{\"decision\":\"ABSTAIN\",\"tool\":\"click\"}", snapshot("1"), Json.mapper()));
+                "{\"decision\":\"ABSTAIN\",\"tool\":\"click\"}",
+                snapshot("1").options(),
+                Json.mapper()));
   }
 
   @Test
@@ -131,13 +137,15 @@ class SnapshotValidationTest {
     assertDoesNotThrow(() -> SnapshotValidation.validate(combined));
     assertEquals(2, SnapshotValidation.assets(combined).size());
     assertNull(
-        SnapshotValidation.decision("{\"decision\":\"ABSTAIN\"}", s, Json.mapper()).optionId());
+        SnapshotValidation.decision("{\"decision\":\"ABSTAIN\"}", s.options(), Json.mapper())
+            .optionId());
     assertThrows(
-        ApiException.class, () -> SnapshotValidation.decision("not-json", s, Json.mapper()));
+        ApiException.class,
+        () -> SnapshotValidation.decision("not-json", s.options(), Json.mapper()));
     assertThrows(
         ApiException.class,
         () ->
             SnapshotValidation.decision(
-                "{\"decision\":\"ANSWER\",\"decision\":\"ABSTAIN\"}", s, Json.mapper()));
+                "{\"decision\":\"ANSWER\",\"decision\":\"ABSTAIN\"}", s.options(), Json.mapper()));
   }
 }

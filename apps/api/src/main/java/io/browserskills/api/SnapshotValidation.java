@@ -114,7 +114,7 @@ public final class SnapshotValidation {
   }
 
   public static Contracts.Decision decision(
-      String content, Contracts.TaskSnapshot snapshot, JsonMapper mapper) {
+      String content, List<Contracts.Option> options, JsonMapper mapper) {
     try {
       var node = mapper.readTree(content);
       require(node.isObject() && node.path("decision").isString());
@@ -124,7 +124,7 @@ public final class SnapshotValidation {
         return new Contracts.Decision("ABSTAIN", null);
       require(decision.equals("ANSWER") && node.path("optionId").isString());
       String option = node.path("optionId").asString();
-      require(snapshot.options().stream().anyMatch(o -> o.id().equals(option)));
+      require(options.stream().anyMatch(o -> o.id().equals(option)));
       return new Contracts.Decision("ANSWER", option);
     } catch (Exception e) {
       throw new ApiException(

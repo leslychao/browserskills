@@ -249,8 +249,8 @@ public class Store {
     return tx.execute(
         status -> {
           var r = locked(user, run);
-          if (!Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION", "SUBMITTING")
-              .contains(r.status())) return null;
+          if (!Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION").contains(r.status()))
+            return null;
           int unresolved =
               db.queryForObject(
                   "SELECT count(*) FROM run_items i JOIN runs r ON r.id=i.run_id WHERE r.user_id=?"
@@ -372,7 +372,9 @@ public class Store {
                   ? "PREPARING"
                   : success
                       ? (r.status().equals("STOPPED") ? "STOPPED" : "COMPLETED")
-                      : itemState.equals("UNKNOWN") ? "UNKNOWN" : r.status().equals("STOPPED") ? "STOPPED" : "FAILED";
+                      : itemState.equals("UNKNOWN")
+                          ? "UNKNOWN"
+                          : r.status().equals("STOPPED") ? "STOPPED" : "FAILED";
           transition(run, state, result.code());
           return next;
         });
@@ -415,7 +417,9 @@ public class Store {
               "UPDATE runs SET status=CASE WHEN EXISTS(SELECT 1 FROM run_items i WHERE"
                   + " i.run_id=runs.id AND i.status='UNKNOWN') THEN 'UNKNOWN' ELSE 'INTERRUPTED'"
                   + " END,error_code='API_RESTARTED',updated_at=? WHERE status IN"
-                  + " ('PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING') OR (status='STOPPED' AND EXISTS (SELECT 1 FROM run_items i WHERE i.run_id=runs.id AND i.status='UNKNOWN'))",
+                  + " ('PREPARING','ANALYZING','AWAITING_CONFIRMATION','SUBMITTING') OR"
+                  + " (status='STOPPED' AND EXISTS (SELECT 1 FROM run_items i WHERE"
+                  + " i.run_id=runs.id AND i.status='UNKNOWN'))",
               Timestamp.from(clock.instant()));
           db.update(
               "UPDATE ai_usage SET status='UNKNOWN',error_code='API_RESTARTED',completed_at=? WHERE"

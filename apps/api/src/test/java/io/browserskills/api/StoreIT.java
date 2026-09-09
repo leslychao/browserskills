@@ -186,4 +186,29 @@ class StoreIT {
     assertFalse(store.disable("missing"));
     assertThrows(ApiException.class, () -> store.provision("six", "hash"));
   }
+
+  @Test
+  void stopDuringDispatchThenRestartRemainsUnknownAndCannotResubmit() {
+    UUID run = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
+    var s = SnapshotValidationTest.snapshot("stop-in-flight");
+    var i = store.draft(user, run, s);
+    store.awaiting(user, run, i.id());
+    store.intent(
+        user,
+        run,
+        new Contracts.Confirm(
+            UUID.randomUUID(),
+            s.taskId(),
+            s.snapshotHash(),
+            s.instruction().hash(),
+            "a",
+            i.nonce().toString()),
+        "a".repeat(64));
+    store.stop(user, run);
+    store.reconcile();
+    assertEquals("UNKNOWN", store.owned(user, run).status());
+    assertEquals("UNKNOWN", store.current(run).status());
+    UUID next = store.create(user, new Contracts.StartRun(UUID.randomUUID(), 1)).run().id();
+    assertThrows(ApiException.class, () -> store.draft(user, next, s));
+  }
 }

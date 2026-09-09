@@ -13,8 +13,11 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
   const authorized=(request:IncomingMessage)=>{const value=Buffer.from(request.headers.authorization??'');return value.length===expected.length&&timingSafeEqual(value,expected);};
   const json=(response:ServerResponse,status:number,body:unknown)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});response.end(JSON.stringify(body));};
   let activeRequests=0;
+  let closing=false;
+  let closePromise:Promise<void>|undefined;
   const server=createServer(async(request,response)=>{
     try{
+      if(closing)throw new WorkerError('WORKER_CLOSING',503);
       const path=new URL(request.url??'/', 'http://worker').pathname;
       if(request.method==='GET'&&path==='/health/live'){json(response,200,{status:'UP'});return;}
       if(!authorized(request))throw new WorkerError('UNAUTHORIZED',401);
@@ -25,6 +28,7 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
         if(request.method==='POST'&&path==='/internal/commands'){
           if(!request.headers['content-type']?.startsWith('application/json'))throw new WorkerError('UNSUPPORTED_CONTENT_TYPE',415);
           let body='';for await(const chunk of request){body+=String(chunk);if(Buffer.byteLength(body)>16_384)throw new WorkerError('REQUEST_TOO_LARGE',413);}
+          if(closing)throw new WorkerError('WORKER_CLOSING',503);
           let parsed:unknown;try{parsed=JSON.parse(body);}catch{throw new WorkerError('INVALID_COMMAND',400);}
           const command=WorkerCommandSchema.safeParse(parsed);if(!command.success)throw new WorkerError('INVALID_COMMAND',400);
           json(response,200,await owner.command(command.data));return;
@@ -45,12 +49,12 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
   const revoke=()=>{for(const socket of bridge.clients)socket.terminate();};owner.on('revoke',revoke);
   server.on('upgrade',(request,socket,head)=>{
     const path=new URL(request.url??'/', 'http://worker').pathname;
-    if(path!=='/internal/view'||!authorized(request)||!owner.isManual()||bridge.clients.size>=1){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy();return;}
+    if(closing||path!=='/internal/view'||!authorized(request)||!owner.isManual()||bridge.clients.size>=1){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy();return;}
     bridge.handleUpgrade(request,socket,head,ws=>bridge.emit('connection',ws,request));
   });
   bridge.on('connection',ws=>{
     const generation=owner.status().generation!;
-    if(!owner.isManual(generation)){ws.terminate();return;}
+    if(closing||!owner.isManual(generation)){ws.terminate();return;}
     const tcp=connect({host:'127.0.0.1',port:rfbPort});
     const close=()=>{tcp.destroy();ws.terminate();};
     const expiry=setTimeout(close,60*60*1000);expiry.unref();
@@ -64,5 +68,13 @@ export function createWorkerServer(owner:BrowserOwner,token:string,rfbPort=5900)
     });
     tcp.on('error',close);tcp.on('close',()=>ws.terminate());ws.on('error',close);ws.on('close',()=>{clearTimeout(expiry);tcp.destroy();});
   });
-  return {server,close:async()=>{owner.off('revoke',revoke);revoke();bridge.close();await owner.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}};
+  return {server,close:()=>{
+    if(closePromise)return closePromise;
+    closing=true;
+    // Stop accepting sockets before waiting for Chromium to flush its profile.
+    const serverClosed=new Promise<void>(resolve=>server.close(()=>resolve()));
+    owner.off('revoke',revoke);revoke();bridge.close();
+    closePromise=Promise.resolve().then(()=>owner.close()).finally(async()=>{server.closeAllConnections();await serverClosed;});
+    return closePromise;
+  }};
 }

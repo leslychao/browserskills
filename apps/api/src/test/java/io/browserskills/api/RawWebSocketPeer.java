@@ -53,9 +53,9 @@ final class RawWebSocketPeer implements AutoCloseable {
                                     .getBytes(StandardCharsets.ISO_8859_1)));
             out.write(
                 ("HTTP/1.1 101 Switching Protocols\r\n"
-                     + "Upgrade: websocket\r\n"
-                     + "Connection: Upgrade\r\n"
-                     + "Sec-WebSocket-Accept: "
+                        + "Upgrade: websocket\r\n"
+                        + "Connection: Upgrade\r\n"
+                        + "Sec-WebSocket-Accept: "
                         + accept
                         + "\r\nSec-WebSocket-Protocol: binary\r\n\r\n")
                     .getBytes(StandardCharsets.ISO_8859_1));

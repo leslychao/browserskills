@@ -82,6 +82,8 @@ HTTP bearer token from per-worker secret file. No arbitrary worker URL from publ
 ## AI and persistence
 
 - API builds model request itself from the worker snapshot and complete instruction blocks. POST /v1/chat/completions to private inference, input_audio plus images/text, schema-constrained Decision, strict response validation against current option IDs. No tools.
+- Model-visible option identifiers are request-local, unique ten-letter lowercase aliases. Labels and ordering stay intact; the API validates the returned alias and maps it back to the original snapshot option ID. Aliases never reach the public contract, worker submission or persistent history. This internal adaptation addresses the observed confusion between numeric-looking IDs and numeric answer labels; it does not prove model accuracy.
+- Disable inference prompt caching and saved idle-slot caches. Each request contains its own complete instructions/materials; serving memory is bounded without an additional multi-gigabyte cross-request cache.
 - One running request + at most four waiting; max one/user. Queue deadline120s, inference120s, platform task expiry takes precedence. Invalid JSON, timeout, model absence and quota exhaustion expose manual selection with aiError.
 - 100 analyses/user/day UTC; atomic reservation and idempotent request IDs, don't reserve again on retry. No indefinite retries.
 - Store users, browser assignments, runs, run_items and ai_usage plus instruction/media/model hashes. Active material bytes and full instruction bodies aren't persistent history.
@@ -93,7 +95,8 @@ HTTP bearer token from per-worker secret file. No arbitrary worker URL from publ
 - Test 50 unique confirmed sends, idempotent confirms, changed instructions, stale task rerenders, whole-task rejection, error/timeout after click, API/worker crashes, stop, login expiry, owner isolation and noVNC revocation.
 - Media tests: Range, cross-user access, bad audio, bounds, inaccessible instructions/examples, no silent clipping, instructions asking about speech vs background sound.
 - Model evaluation: labelled 25 text,25 image,25 speech,25 sound/prosody minimum; >=90% correct/category counting abstentions as unsolved. p95<=30s text/image,<=90s task audio<=60s excluding queue. Report real GPU/RAM usage and actual measured evidence; fixture/mock is not real model/site verification.
-- Live Yandex DOM is not inspected yet; do not invent evidence or label synthetic selectors as verified live support. Final ready claim requires authenticated compatible real templates.
+- Live Yandex demo navigation and the complete image-classification instruction were inspected on 2026-09-09. The task route embeds https://iframe-tasks.yandex, whose body remained empty after a reload; no question/options or whole-submit-unit identity could be verified. No answer was submitted. Do not label synthetic selectors as verified live support. Final ready claim requires loaded, compatible real templates.
+- A separate search-query classification demo (pool5221474) also exposed its full instruction, while its task iframe remained empty. A second template therefore did not resolve the live-site verification blocker.
 - Operations: start after Windows reboot, pinned image update, DB and stopped-profile backup/restore, explicit .107 preflight. Root coordinates final diff and requirement audit.
 
 ## Ownership

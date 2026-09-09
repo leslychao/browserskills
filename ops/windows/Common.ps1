@@ -23,6 +23,10 @@ function Set-ProtectedDirectory([string]$Path) {
         $cursor = [IO.Path]::GetDirectoryName($cursor)
     }
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    $children = @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
+    if ($children | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
+        throw 'Protected directories cannot contain reparse points.'
+    }
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) {
@@ -30,6 +34,13 @@ function Set-ProtectedDirectory([string]$Path) {
             [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
+    foreach ($child in $children) {
+        # Existing files may have explicit grants that do not disappear when the parent is protected.
+        $childAcl = Get-Acl -LiteralPath $child.FullName
+        $childAcl.SetAccessRuleProtection($false, $false)
+        foreach ($rule in @($childAcl.Access | Where-Object { -not $_.IsInherited })) { $childAcl.RemoveAccessRuleAll($rule) }
+        Set-Acl -LiteralPath $child.FullName -AclObject $childAcl
+    }
 }
 
 function Invoke-Checked([string]$Executable, [string[]]$Arguments) {

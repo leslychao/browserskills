@@ -38,4 +38,6 @@ Each confirmation is bound to the task, full instruction hash, snapshot and sing
 
 Current full text/media are ephemeral and bounded (512 KiB of text and 64 MiB of original assets per current task). Oversized or inaccessible material fails explicitly; nothing is silently clipped. Original audio is served with owner-checked single-range responses. Only the model representation is converted to mono 16 kHz PCM WAV; silence, speed and duration are preserved. Multimodal context overflow is rejected by inference configured with `--no-context-shift` and exposed for manual selection.
 
+Model requests use fresh opaque ten-letter option aliases with unchanged labels and order. A valid reply is mapped back to the original option ID; aliases remain local to that inference call and never enter the UI or database. Unknown aliases are rejected, and `ABSTAIN` remains available. Prompt caching is explicitly disabled.
+
 Do not enable request-body, HTTP wire or inference prompt logs. Database history contains task identities, hashes, outcomes and selected option IDs, not raw tasks, instructions or media. Session lifetime is one absolute hour; restart requires login. Existing manual WebSockets are revoked on lease release, logout, expiry, disabled account, automation start or worker-generation termination.

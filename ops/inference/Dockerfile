@@ -13,11 +13,12 @@ RUN --mount=type=cache,id=browserskills-llama-5266f24-cuda86,target=/src/build \
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp" org.opencontainers.image.revision="5266f24da75dc449bd56cbed7addb9c8e4a6a73e" org.opencontainers.image.version="0.4.0"
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 libgomp1 libssl3t64 && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 ffmpeg libgomp1 libssl3t64 && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home inference
 COPY --from=build /binaries/ /app/
 COPY --from=build /libraries/ /app/
-COPY ops/inference/serve.py ops/inference/evaluate.py ops/inference/model.lock.json /app/
+COPY ops/inference/serve.py ops/inference/evaluate.py ops/inference/model.lock.json ops/inference/recipe_lock.py /app/
+COPY apps/api/src/main/resources/decision-system.txt /app/decision-system.txt
 ENV LD_LIBRARY_PATH=/app HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 USER 10001:10001
 WORKDIR /app
@@ -33,8 +34,9 @@ COPY --from=build /src/conversion /conversion/conversion
 COPY --from=build /src/gguf-py /conversion/gguf-py
 COPY --from=build /src/requirements /conversion/requirements
 COPY ops/inference/conversion-requirements.lock /conversion/conversion-requirements.lock
-RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r /conversion/conversion-requirements.lock \
+RUN echo '666b8c76039915ed177e5dacefd763b87c9de2d247da4f9a145bc28121603698  /conversion/conversion-requirements.lock' | sha256sum --check - \
+    && python3 -m venv /venv && /venv/bin/pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r /conversion/conversion-requirements.lock \
     && /venv/bin/pip check && /venv/bin/pip freeze > /conversion/python-packages.lock
-COPY ops/inference/model.lock.json ops/inference/prepare_model.py /conversion/
+COPY ops/inference/model.lock.json ops/inference/prepare_model.py ops/inference/recipe_lock.py /conversion/
 ENV HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
 ENTRYPOINT ["/venv/bin/python", "/conversion/prepare_model.py"]

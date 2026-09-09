@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Configuration;
@@ -26,13 +27,42 @@ public class VncProxy implements WebSocketConfigurer {
   private final ManualLeases leases;
   private final String origin;
   private final Map<String, Link> links = new ConcurrentHashMap<>();
+  private final Map<UUID, Object> connectionLocks = new ConcurrentHashMap<>();
   private final ScheduledExecutorService timer =
       Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("vnc-expiry").factory());
   private final HttpClient client =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
-  private record Link(
-      WebSocketSession browser, String session, UUID user, java.net.http.WebSocket upstream) {}
+  private static final class Link {
+    final WebSocketSession browser;
+    final String session;
+    final UUID user;
+    final AtomicBoolean closed = new AtomicBoolean();
+    volatile java.net.http.WebSocket upstream;
+    volatile CompletableFuture<java.net.http.WebSocket> pending;
+
+    Link(WebSocketSession browser, String session, UUID user) {
+      this.browser = browser;
+      this.session = session;
+      this.user = user;
+    }
+
+    WebSocketSession browser() {
+      return browser;
+    }
+
+    String session() {
+      return session;
+    }
+
+    UUID user() {
+      return user;
+    }
+
+    java.net.http.WebSocket upstream() {
+      return upstream;
+    }
+  }
 
   public VncProxy(
       Store store,
@@ -108,7 +138,9 @@ public class VncProxy implements WebSocketConfigurer {
   }
 
   private void close(Link link) {
+    if (!link.closed.compareAndSet(false, true)) return;
     links.remove(link.browser().getId(), link);
+    if (link.pending != null) link.pending.cancel(true);
     if (link.upstream() != null) link.upstream().abort();
     try {
       link.browser().close(CloseStatus.POLICY_VIOLATION);
@@ -133,69 +165,80 @@ public class VncProxy implements WebSocketConfigurer {
                   + "://"
                   + http.getRawAuthority()
                   + http.getRawPath());
-      var pending = new Link(browser, session, user, null);
-      links.put(browser.getId(), pending);
-      client
-          .newWebSocketBuilder()
-          .connectTimeout(Duration.ofSeconds(5))
-          .header("Authorization", "Bearer " + worker.token(lease.worker()))
-          .subprotocols("binary")
-          .buildAsync(
-              ws,
-              new java.net.http.WebSocket.Listener() {
-                public void onOpen(java.net.http.WebSocket upstream) {
-                  var link = new Link(browser, session, user, upstream);
-                  if (!links.replace(browser.getId(), pending, link) || !valid(link)) {
-                    upstream.abort();
-                    close(link);
-                    return;
-                  }
-                  upstream.request(1);
-                }
+      var pending = new Link(browser, session, user);
+      synchronized (connectionLocks.computeIfAbsent(user, ignored -> new Object())) {
+        links.values().stream()
+            .filter(link -> link.user().equals(user))
+            .toList()
+            .forEach(VncProxy.this::close);
+        if (!browser.isOpen() || !leases.valid(user, session)) return;
+        links.put(browser.getId(), pending);
+        pending.pending =
+            client
+                .newWebSocketBuilder()
+                .connectTimeout(Duration.ofSeconds(5))
+                .header("Authorization", "Bearer " + worker.token(lease.worker()))
+                .subprotocols("binary")
+                .buildAsync(
+                    ws,
+                    new java.net.http.WebSocket.Listener() {
+                      public void onOpen(java.net.http.WebSocket upstream) {
+                        pending.upstream = upstream;
+                        if (links.get(browser.getId()) != pending
+                            || pending.closed.get()
+                            || !valid(pending)) {
+                          upstream.abort();
+                          close(pending);
+                          return;
+                        }
+                        upstream.request(1);
+                      }
 
-                public CompletionStage<?> onBinary(
-                    java.net.http.WebSocket socket, ByteBuffer bytes, boolean last) {
-                  var link = links.get(browser.getId());
-                  if (link == null || !valid(link) || bytes.remaining() > 1024 * 1024) {
-                    socket.abort();
-                    if (link != null) close(link);
-                    return null;
-                  }
-                  try {
-                    synchronized (browser) {
-                      browser.sendMessage(new BinaryMessage(bytes));
-                    }
-                    socket.request(1);
-                  } catch (Exception e) {
-                    close(link);
-                  }
-                  return null;
-                }
+                      public CompletionStage<?> onBinary(
+                          java.net.http.WebSocket socket, ByteBuffer bytes, boolean last) {
+                        var link = links.get(browser.getId());
+                        if (link == null || !valid(link) || bytes.remaining() > 1024 * 1024) {
+                          socket.abort();
+                          if (link != null) close(link);
+                          return null;
+                        }
+                        try {
+                          synchronized (browser) {
+                            browser.sendMessage(new BinaryMessage(bytes));
+                          }
+                          socket.request(1);
+                        } catch (Exception e) {
+                          close(link);
+                        }
+                        return null;
+                      }
 
-                public CompletionStage<?> onText(
-                    java.net.http.WebSocket socket, CharSequence data, boolean last) {
-                  socket.abort();
-                  close(pending);
-                  return null;
-                }
+                      public CompletionStage<?> onText(
+                          java.net.http.WebSocket socket, CharSequence data, boolean last) {
+                        socket.abort();
+                        close(pending);
+                        return null;
+                      }
 
-                public CompletionStage<?> onClose(
-                    java.net.http.WebSocket socket, int code, String reason) {
-                  var link = links.get(browser.getId());
-                  if (link != null) close(link);
-                  return null;
-                }
+                      public CompletionStage<?> onClose(
+                          java.net.http.WebSocket socket, int code, String reason) {
+                        var link = links.get(browser.getId());
+                        if (link != null) close(link);
+                        return null;
+                      }
 
-                public void onError(java.net.http.WebSocket socket, Throwable error) {
-                  var link = links.get(browser.getId());
-                  if (link != null) close(link);
-                }
-              })
-          .exceptionally(
-              error -> {
-                close(pending);
-                return null;
-              });
+                      public void onError(java.net.http.WebSocket socket, Throwable error) {
+                        var link = links.get(browser.getId());
+                        if (link != null) close(link);
+                      }
+                    });
+        if (pending.closed.get() || !browser.isOpen()) pending.pending.cancel(true);
+        pending.pending.exceptionally(
+            error -> {
+              close(pending);
+              return null;
+            });
+      }
     }
 
     protected void handleBinaryMessage(WebSocketSession browser, BinaryMessage message) {
@@ -212,8 +255,8 @@ public class VncProxy implements WebSocketConfigurer {
     }
 
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-      var link = links.remove(session.getId());
-      if (link != null && link.upstream() != null) link.upstream().abort();
+      var link = links.get(session.getId());
+      if (link != null) close(link);
     }
 
     public void handleTransportError(WebSocketSession session, Throwable error) {

@@ -43,7 +43,7 @@ $report = [ordered]@{
     networkCategories = @(Get-NetConnectionProfile | Select-Object InterfaceIndex,NetworkCategory)
     freeDiskGiB = @(Get-Volume | Where-Object DriveLetter | ForEach-Object { @{ drive = $_.DriveLetter; freeGiB = [math]::Round($_.SizeRemaining / 1GB, 2) } })
     dockerReady = $dockerReady; docker = $dockerVersion; wsl = $wsl; containerGpu = $containerGpu
-    listeningPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -In @(8443, 11434, 5432) | Select-Object LocalAddress,LocalPort,OwningProcess)
+    listeningPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -In @(8443, 8080, 3000, 5432, 5900) | Select-Object LocalAddress,LocalPort,OwningProcess)
     requirements = @{ engine = 'Docker Desktop Linux WSL2'; freeDiskGiB = 100; gpuBenchmarkRequired = $true }
 }
 $json = $report | ConvertTo-Json -Depth 6

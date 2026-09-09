@@ -77,12 +77,13 @@ public class Orchestrator {
 
   public Contracts.BrowserStatus browser(UUID user, boolean open) {
     var u = store.user(user);
-    initialize(u.workerId());
-    if (!open) return worker.status(u.workerId());
     synchronized (lock(user)) {
+      initialize(u.workerId());
+      if (!open) return worker.status(u.workerId());
       if (store.active(user))
         throw new ApiException(
             409, "RUN_ACTIVE", "Stop the active run before opening manual control.");
+      releaseOrphanedTerminalRun(u);
       return worker.command(u.workerId(), "OPEN", null, null, null, Contracts.BrowserStatus.class);
     }
   }
@@ -90,11 +91,12 @@ public class Orchestrator {
   public Contracts.BrowserStatus manual(
       UUID user, String session, Instant expires, boolean acquire) {
     var u = store.user(user);
-    initialize(u.workerId());
     synchronized (lock(user)) {
+      initialize(u.workerId());
       if (acquire) {
         if (store.active(user))
           throw new ApiException(409, "RUN_ACTIVE", "Stop the active run first.");
+        releaseOrphanedTerminalRun(u);
         var status = worker.status(u.workerId());
         leases.acquire(user, u.workerId(), session, status.generation(), expires);
         try {
@@ -118,25 +120,27 @@ public class Orchestrator {
   }
 
   public void logout(UUID user, String session) {
-    if (leases.valid(user, session)) {
-      leases.revokeSession(session);
-      try {
-        worker.command(
-            store.user(user).workerId(),
-            "EXIT_MANUAL",
-            null,
-            null,
-            null,
-            Contracts.BrowserStatus.class);
-      } catch (Exception ignored) {
-      }
-    } else leases.revokeSession(session);
+    synchronized (lock(user)) {
+      if (leases.valid(user, session)) {
+        leases.revokeSession(session);
+        try {
+          worker.command(
+              store.user(user).workerId(),
+              "EXIT_MANUAL",
+              null,
+              null,
+              null,
+              Contracts.BrowserStatus.class);
+        } catch (Exception ignored) {
+        }
+      } else leases.revokeSession(session);
+    }
   }
 
   public Contracts.RunView start(UUID user, Contracts.StartRun request) {
     var u = store.user(user);
-    initialize(u.workerId());
     synchronized (lock(user)) {
+      initialize(u.workerId());
       var created = store.create(user, request);
       if (!created.fresh()) return view(user, created.run().id());
       UUID run = created.run().id();
@@ -149,6 +153,9 @@ public class Orchestrator {
               if (status.generation() == null || status.mode().equals("CLOSED"))
                 throw new ApiException(409, "BROWSER_CLOSED", "Open the browser and a task first.");
               if (!store.owned(user, run).status().equals("PREPARING")) return;
+              // Persist the expected generation before BEGIN so a lost BEGIN response can
+              // still be stopped without clearing a later generation.
+              store.generation(user, run, status.generation());
               var begun =
                   worker.command(
                       u.workerId(),
@@ -157,7 +164,9 @@ public class Orchestrator {
                       run,
                       null,
                       Contracts.BrowserStatus.class);
-              store.generation(user, run, begun.generation());
+              if (!status.generation().equals(begun.generation()))
+                throw new ApiException(
+                    409, "STALE_GENERATION", "Browser restarted before claiming the run.");
               if (!store.owned(user, run).status().equals("PREPARING")) {
                 releaseWorker(user, run, begun.generation());
                 return;
@@ -179,10 +188,10 @@ public class Orchestrator {
     int w = store.user(user).workerId();
     var snapshot =
         worker.command(w, "SNAPSHOT", r.generation(), run, null, Contracts.TaskSnapshot.class);
-    install(user, run, snapshot);
+    install(user, run, snapshot, null);
   }
 
-  private void install(UUID user, UUID run, Contracts.TaskSnapshot snapshot) {
+  private void install(UUID user, UUID run, Contracts.TaskSnapshot snapshot, UUID expectedItem) {
     SnapshotValidation.validate(snapshot);
     if (snapshot.expiresAt() != null && !snapshot.expiresAt().isAfter(clock.instant()))
       throw new ApiException(409, "TASK_EXPIRED", "Task expired.");
@@ -190,20 +199,31 @@ public class Orchestrator {
     int w = store.user(user).workerId();
     for (var asset : SnapshotValidation.assets(snapshot))
       bytes.put(asset.id(), worker.media(w, asset));
-    Store.Item item = store.draft(user, run, snapshot);
-    if (item == null) return;
-    var current =
-        new Materials.Current(item.id(), snapshot, item.nonce().toString(), bytes, null, null);
-    materials.put(run, current);
-    ai.submit(
-        user,
-        run,
-        current,
-        (proposal, error) -> {
-          if (!store.owned(user, run).status().equals("ANALYZING")) return;
-          materials.result(run, item.id(), proposal, error);
-          store.awaiting(user, run, item.id());
-        });
+    synchronized (lock(user)) {
+      var r = store.owned(user, run);
+      var previous = materials.get(run);
+      if (!Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION").contains(r.status())
+          || !Objects.equals(expectedItem, previous == null ? null : previous.itemId())) return;
+      Store.Item item = store.draft(user, run, snapshot);
+      if (item == null) return;
+      var current =
+          new Materials.Current(item.id(), snapshot, item.nonce().toString(), bytes, null, null);
+      materials.put(run, current);
+      ai.submit(
+          user,
+          run,
+          current,
+          (proposal, error) -> {
+            synchronized (lock(user)) {
+              var active = materials.get(run);
+              if (!store.owned(user, run).status().equals("ANALYZING")
+                  || active == null
+                  || !active.itemId().equals(item.id())) return;
+              materials.result(run, item.id(), proposal, error);
+              store.awaiting(user, run, item.id());
+            }
+          });
+    }
   }
 
   public Contracts.RunView confirm(UUID user, UUID run, Contracts.Confirm confirm) {
@@ -212,37 +232,52 @@ public class Orchestrator {
         || !SnapshotValidation.id(confirm.optionId())) throw ApiException.invalid();
     String hash = SnapshotValidation.sha256(json.writeValueAsBytes(confirm));
     if (store.duplicateConfirm(user, run, confirm, hash)) return view(user, run);
+    Store.Run observed;
+    Materials.Current current;
     synchronized (lock(user)) {
-      var r = store.owned(user, run);
-      var current = materials.get(run);
-      if (!r.status().equals("AWAITING_CONFIRMATION") || current == null) throw stale();
+      observed = store.owned(user, run);
+      current = materials.get(run);
+      if (!observed.status().equals("AWAITING_CONFIRMATION") || current == null) throw stale();
       if (current.snapshot().options().stream().noneMatch(o -> o.id().equals(confirm.optionId())))
         throw ApiException.invalid();
-      var fresh =
-          worker.command(
-              store.user(user).workerId(),
-              "SNAPSHOT",
-              r.generation(),
-              run,
-              null,
-              Contracts.TaskSnapshot.class);
-      SnapshotValidation.validate(fresh);
-      if (!fresh.taskId().equals(current.snapshot().taskId())
-          || !fresh.snapshotHash().equals(current.snapshot().snapshotHash())
-          || !fresh.instruction().hash().equals(current.snapshot().instruction().hash())) {
-        materials.remove(run);
-        install(user, run, fresh);
-        throw stale();
-      }
+    }
+    // Keep worker I/O outside the ownership lock: STOP must be able to cancel an
+    // outstanding snapshot. The state and item are checked again before persisting intent.
+    var fresh =
+        worker.command(
+            store.user(user).workerId(),
+            "SNAPSHOT",
+            observed.generation(),
+            run,
+            null,
+            Contracts.TaskSnapshot.class);
+    SnapshotValidation.validate(fresh);
+    synchronized (lock(user)) {
+      if (store.duplicateConfirm(user, run, confirm, hash)) return view(user, run);
+      var r = store.owned(user, run);
+      var active = materials.get(run);
+      if (!r.status().equals("AWAITING_CONFIRMATION")
+          || active == null
+          || !active.itemId().equals(current.itemId())) throw stale();
       if (fresh.expiresAt() != null && !fresh.expiresAt().isAfter(clock.instant())) {
         fail(user, run, "TASK_EXPIRED");
         throw stale();
       }
-      if (!store.intent(user, run, confirm, hash)) return view(user, run);
-      materials.remove(run);
-      executor.execute(() -> dispatch(user, run, r.generation(), confirm));
-      return view(user, run);
+      if (sameTask(fresh, current.snapshot())) {
+        if (!store.intent(user, run, confirm, hash)) return view(user, run);
+        materials.remove(run);
+        executor.execute(() -> dispatch(user, run, r.generation(), confirm));
+        return view(user, run);
+      }
     }
+    install(user, run, fresh, current.itemId());
+    throw stale();
+  }
+
+  private boolean sameTask(Contracts.TaskSnapshot a, Contracts.TaskSnapshot b) {
+    return a.taskId().equals(b.taskId())
+        && a.snapshotHash().equals(b.snapshotHash())
+        && a.instruction().hash().equals(b.instruction().hash());
   }
 
   private ApiException stale() {
@@ -298,23 +333,48 @@ public class Orchestrator {
           null,
           Contracts.BrowserStatus.class);
     } catch (Exception ignored) {
-      initialized.remove(store.user(user).workerId());
+      // A late result can belong to an older generation. Never turn its failed STOP into
+      // an unfenced CLOSE on the next request. Explicit browser opening can retry a
+      // generation-bound STOP after verifying that the worker still owns this terminal run.
     }
   }
 
+  private void releaseOrphanedTerminalRun(Store.User user) {
+    var status = worker.status(user.workerId());
+    if (!"AUTOMATION".equals(status.mode()) || status.runId() == null) return;
+    UUID run;
+    try {
+      run = UUID.fromString(status.runId());
+    } catch (IllegalArgumentException e) {
+      throw new ApiException(409, "WORKER_BUSY", "Browser ownership could not be verified.");
+    }
+    var owned = store.owned(user.id(), run);
+    if (Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION", "SUBMITTING")
+        .contains(owned.status()))
+      throw new ApiException(409, "RUN_ACTIVE", "Stop the active run first.");
+    worker.command(
+        user.workerId(), "STOP", status.generation(), run, null, Contracts.BrowserStatus.class);
+  }
+
   private void fail(UUID user, UUID run, String code) {
-    store.fail(user, run, code);
-    materials.remove(run);
-    releaseWorker(user, run, store.owned(user, run).generation());
+    synchronized (lock(user)) {
+      store.fail(user, run, code);
+      materials.remove(run);
+      releaseWorker(user, run, store.owned(user, run).generation());
+    }
   }
 
   public Contracts.RunView stop(UUID user, UUID run) {
-    var r = store.owned(user, run);
-    store.stop(user, run);
-    materials.remove(run);
-    leases.revoke(user);
-    releaseWorker(user, run, r.generation());
-    return view(user, run);
+    synchronized (lock(user)) {
+      var r = store.owned(user, run);
+      if (!Set.of("PREPARING", "ANALYZING", "AWAITING_CONFIRMATION", "SUBMITTING")
+          .contains(r.status())) return view(user, run);
+      store.stop(user, run);
+      materials.remove(run);
+      leases.revoke(user);
+      releaseWorker(user, run, r.generation());
+      return view(user, run);
+    }
   }
 
   public List<Contracts.RunSummary> list(UUID user) {
@@ -340,36 +400,46 @@ public class Orchestrator {
     refreshed.put(run, clock.instant());
     executor.execute(
         () -> {
+          Materials.Current observed = null;
           try {
+            Store.Run r;
             synchronized (lock(user)) {
-              var r = store.owned(user, run);
-              var current = materials.get(run);
-              if (!r.status().equals("AWAITING_CONFIRMATION") || current == null) return;
-              var fresh =
-                  worker.command(
-                      store.user(user).workerId(),
-                      "SNAPSHOT",
-                      r.generation(),
-                      run,
-                      null,
-                      Contracts.TaskSnapshot.class);
-              SnapshotValidation.validate(fresh);
-              if (!fresh.taskId().equals(current.snapshot().taskId())
-                  || !fresh.snapshotHash().equals(current.snapshot().snapshotHash())
-                  || !fresh.instruction().hash().equals(current.snapshot().instruction().hash())) {
-                materials.remove(run);
-                install(user, run, fresh);
-              } else if (fresh.expiresAt() != null && !fresh.expiresAt().isAfter(clock.instant()))
-                fail(user, run, "TASK_EXPIRED");
+              r = store.owned(user, run);
+              observed = materials.get(run);
+              if (!r.status().equals("AWAITING_CONFIRMATION") || observed == null) return;
+            }
+            var fresh =
+                worker.command(
+                    store.user(user).workerId(),
+                    "SNAPSHOT",
+                    r.generation(),
+                    run,
+                    null,
+                    Contracts.TaskSnapshot.class);
+            SnapshotValidation.validate(fresh);
+            if (fresh.expiresAt() != null && !fresh.expiresAt().isAfter(clock.instant())) {
+              failObserved(user, run, observed, "TASK_EXPIRED");
+            } else if (!sameTask(fresh, observed.snapshot())) {
+              install(user, run, fresh, observed.itemId());
             }
           } catch (ApiException e) {
-            fail(user, run, e.code());
+            failObserved(user, run, observed, e.code());
           } catch (Exception e) {
-            fail(user, run, "WORKER_UNAVAILABLE");
+            failObserved(user, run, observed, "WORKER_UNAVAILABLE");
           } finally {
             refreshing.remove(run);
           }
         });
+  }
+
+  private void failObserved(UUID user, UUID run, Materials.Current observed, String code) {
+    synchronized (lock(user)) {
+      var current = materials.get(run);
+      if (observed != null
+          && current != null
+          && current.itemId().equals(observed.itemId())
+          && store.owned(user, run).status().equals("AWAITING_CONFIRMATION")) fail(user, run, code);
+    }
   }
 
   public Contracts.RunView view(UUID user, UUID run) {

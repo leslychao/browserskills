@@ -57,9 +57,11 @@ public class AudioNormalizer {
       if (size < 44 || size > 4_000_000 || size > durationMs * 34 + 4096)
         throw new IllegalStateException();
       byte[] normalized = Files.readAllBytes(output);
-      try(var stream = javax.sound.sampled.AudioSystem.getAudioInputStream(new java.io.ByteArrayInputStream(normalized))) {
-        double actualMs = stream.getFrameLength()*1000.0/stream.getFormat().getSampleRate();
-        if(Math.abs(actualMs-durationMs)>200)throw new IllegalStateException();
+      try (var stream =
+          javax.sound.sampled.AudioSystem.getAudioInputStream(
+              new java.io.ByteArrayInputStream(normalized))) {
+        double actualMs = stream.getFrameLength() * 1000.0 / stream.getFormat().getSampleRate();
+        if (Math.abs(actualMs - durationMs) > 200) throw new IllegalStateException();
       }
       return normalized;
     } catch (InterruptedException e) {
@@ -70,11 +72,15 @@ public class AudioNormalizer {
           502, "AUDIO_UNAVAILABLE", "Audio cannot be normalized without modifying its duration.");
     } finally {
       if (process != null && process.isAlive()) {
-        boolean interrupted=Thread.interrupted();
+        boolean interrupted = Thread.interrupted();
         process.destroyForcibly();
-        try { process.waitFor(5,TimeUnit.SECONDS); }
-        catch(InterruptedException ignored) { interrupted=true; }
-        finally { if(interrupted)Thread.currentThread().interrupt(); }
+        try {
+          process.waitFor(5, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+          interrupted = true;
+        } finally {
+          if (interrupted) Thread.currentThread().interrupt();
+        }
       }
       if (directory != null) {
         try {

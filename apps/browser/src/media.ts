@@ -9,6 +9,7 @@ import { WorkerError } from './errors.js';
 
 const MAX_ASSET = 20 * 1024 * 1024;
 const MAX_TOTAL = 64 * 1024 * 1024;
+const AUDIO_FORMATS = 'wav,mp3,flac,ogg,matroska,webm,mov,mp4';
 export const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
 
 export interface StoredAsset { metadata: MediaAsset; path: string; }
@@ -43,6 +44,11 @@ export class MediaStore {
         mimeType=formats[metadata.format??'']!;
         if(!mimeType) throw new WorkerError('UNSUPPORTED_IMAGE',422);
       } else {
+        const magic=bytes.toString('ascii',0,4);
+        const recognized=(magic==='RIFF'&&bytes.toString('ascii',8,12)==='WAVE')||magic==='fLaC'||magic==='OggS'
+          ||bytes.toString('ascii',0,3)==='ID3'||(bytes[0]===0xff&&(bytes[1]!&0xe0)===0xe0)
+          ||bytes.subarray(0,4).equals(Buffer.from([0x1a,0x45,0xdf,0xa3]))||bytes.toString('ascii',4,8)==='ftyp';
+        if(!recognized)throw new WorkerError('UNSUPPORTED_AUDIO',422);
         const metadata=await this.probe(path);
         const streams=metadata.streams;
         if(!Array.isArray(streams) || streams.length!==1 || streams[0]?.codec_type!=='audio'
@@ -65,7 +71,7 @@ export class MediaStore {
 
   private decodedDuration(path:string,limitMs:number):Promise<number>{
     return new Promise((resolvePromise,reject)=>{
-      const child=spawn(process.env.FFMPEG_PATH||'ffmpeg',['-v','error','-xerror','-err_detect','explode','-i',path,'-map','0:a:0','-vn','-sn','-dn','-ac','1','-ar','16000','-f','s16le','pipe:1'],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+      const child=spawn(process.env.FFMPEG_PATH||'ffmpeg',['-v','error','-xerror','-err_detect','explode','-protocol_whitelist','file,pipe','-format_whitelist',AUDIO_FORMATS,'-i',path,'-map','0:a:0','-vn','-sn','-dn','-ac','1','-ar','16000','-f','s16le','pipe:1'],{windowsHide:true,stdio:['ignore','pipe','ignore']});
       let bytes=0;let settled=false;
       const finish=(error?:WorkerError)=>{if(settled)return;settled=true;clearTimeout(timer);if(error)reject(error);else if(!bytes)reject(new WorkerError('UNSUPPORTED_AUDIO',422));else resolvePromise(Math.ceil(bytes/32));};
       const timer=setTimeout(()=>{child.kill();finish(new WorkerError('MEDIA_PROBE_TIMEOUT',422));},30_000);
@@ -77,7 +83,7 @@ export class MediaStore {
 
   private probe(path:string):Promise<{streams?:Array<{codec_type?:string;channels:number}>;format?:{duration?:string;format_name?:string}}> {
     return new Promise((resolvePromise,reject)=>{
-      const child=spawn(this.ffprobe,['-v','error','-show_entries','stream=codec_type,channels:format=duration,format_name','-of','json',path],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+      const child=spawn(this.ffprobe,['-v','error','-protocol_whitelist','file,pipe','-format_whitelist',AUDIO_FORMATS,'-show_entries','stream=codec_type,channels:format=duration,format_name','-of','json',path],{windowsHide:true,stdio:['ignore','pipe','ignore']});
       let output=''; let settled=false;
       const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timer);if(error)reject(error);else{try{resolvePromise(JSON.parse(output));}catch{reject(new WorkerError('UNSUPPORTED_AUDIO',422));}}};
       const timer=setTimeout(()=>{child.kill();finish(new WorkerError('MEDIA_PROBE_TIMEOUT',422));},10_000);

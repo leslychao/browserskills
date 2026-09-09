@@ -251,6 +251,25 @@ class ServerIT {
                 "/api/auth/login",
                 Map.of("login", "alice", "password", "test-password-123"))
             .statusCode());
+    csrf = json(request("GET", "/api/auth/csrf", null)).path("token").asString();
+    byte[] oversized =
+        ("{\"login\":\"alice\",\"password\":\"" + "x".repeat(32768) + "\"}")
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    var chunked =
+        HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(oversized));
+    assertEquals(-1, chunked.contentLength());
+    var rejected =
+        client.send(
+            HttpRequest.newBuilder(uri("/api/auth/login"))
+                .version(HttpClient.Version.HTTP_1_1)
+                .timeout(Duration.ofSeconds(5))
+                .header("Content-Type", "application/json")
+                .header("X-CSRF-TOKEN", csrf)
+                .POST(chunked)
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertEquals(413, rejected.statusCode(), rejected.body());
+    assertEquals("REQUEST_TOO_LARGE", json(rejected).path("code").asString());
     login();
     assertEquals("alice", json(request("GET", "/api/me", null)).path("login").asString());
     assertEquals(200, request("POST", "/api/browser", null).statusCode());

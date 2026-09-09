@@ -1,0 +1,64 @@
+# Verification record — 2026-09-09
+
+This record distinguishes the owned fixtures from live Yandex and actual model acceptance. It is not a deployment-ready claim.
+
+## Confirmed locally
+
+- Web unit tests: 18 passed; 91.47% line coverage, 86.4% branch coverage. Tests include stale instruction/nonce handling, media failure, session errors and manual selection.
+- API Maven verify after request-local option mapping: 23 unit and 11 real-PostgreSQL integration tests passed without skips; 90.45% line coverage with no exclusions. This includes alias mapping, unknown/original-ID rejection and concurrent map isolation. Additional real chunked HTTP login above 32 KiB returned 413, followed by a successful normal login.
+- Frontend Chromium tests with stub HTTP API: 2 passed, including audio UI, uncertain submission and mobile login layout.
+- Full system fixture: 5 passed in 30.3 seconds after the final STOP/late-result synchronization and model option-mapping changes, with the production web bundle, real PostgreSQL17.9, Spring API, five independent Chromium profiles and actual FFmpeg/ffprobe. The model endpoint was a deterministic stub that selects the received model ID by option label. The scenarios verified 50 distinct sends with duplicate confirmations, UNKNOWN after a lost site response, owner isolation, original image bytes, original task audio and instruction-example audio, SHA256/Range, HTML audio playback, full instruction transmission and `input_audio` requests.
+- The browser worker's final built-image Docker suite passed all 94 tests in19.08 seconds, with97.38% line coverage and84.33% branch coverage. This final run used the source/tests packaged in the image, with no source mounts. Regressions cover command admission during shutdown, a partially transmitted OPEN, idempotent server close and waiting for a cancelled pending Chromium launch to release its profile. Exact commands are in [apps/browser/README.md](../apps/browser/README.md) and [operations](operations.md).
+- Full production web bundle → noVNC → Spring proxy → headed Docker Chromium test passed in8.0 seconds with the final API artifact and browser image. The worker uses a read-only root filesystem and the production supervisor. It verified the real1366×768 framebuffer, reconnection after page refresh, rejection of a competing authenticated session, revocation of the existing socket before automation, and socket closure on logout. The test checks reconnection through a completed replacement RFB handshake: Playwright clears its old WebSocket tracking on top-level navigation, so the old object's `isClosed()` cannot verify a reload.
+- `npm run test:profile` passed against the final browser image with the current fixture/supervisor mounted read-only. A persistent HttpOnly cookie and localStorage value survived immediate Docker stop and replacement by a new container/hostname. Both stops exited0 and left no SingletonLock/Cookie/Socket. Report: `.cache/profile-lifecycle/browserskills-profile-f0498389-7b48-412b-a331-f1fb9afd0e8a/report.json`.
+- API Docker image built successfully. `npm run test:docker-api` passed with the actual image, PostgreSQL application role, non-root UID 10001, read-only root filesystem, verified TLS CA/IP SAN, embedded production web assets, private component readiness, secure cookie/CSRF/login/logout and installed FFmpeg/ffprobe. Workers and inference were intentionally unavailable in this isolated smoke.
+- Official Qwen2.5-Omni-7B weights were verified, converted to Q4_K_M + Q8_0 mmproj and loaded by the pinned llama.cpp CUDA server in a non-root/read-only container. The actual image/audio requests consume modality tokens. Model accuracy is measured separately; successful startup is not acceptance.
+- Operations tooling passed14 unit tests plus actual Windows certificate-chain/IP-SAN/PKCS8 and ACL checks, Compose validation, and a real PostgreSQL dump/restore roundtrip.
+- The full deployment backup/restore fixture passed in153.98 seconds under an ordinary Windows operator token (`WindowsAdministrator=false`). Actual Flyway migrations and CLI provisioning created five users/assignments; completed runs/items/usage were SQL fixtures. Every database table digest and all five persistent cookie/localStorage readbacks matched after the real backup/restore scripts restored fresh volumes. Protected backup ACLs were verified. Stale dangling locks, an actual SIGKILL, a corrupted archive, a missing clean-shutdown flag, nonempty DB/profile volumes were rejected, with existing data preserved. Source and destination used identical immutable image IDs and frozen fixture/supervisor files. All three disposable projects and their volumes were removed. Report: `runtime/browserskills-roundtrip-0afec7f21ff4/report.json`, SHA256 `1da1ea32daf4248d141fe7e20f2aa76a4b33861b4f3d1c0d9081458d674361ee`. These are owned HTTP fixture sessions, not proof that Yandex will retain login after transfer to another host.
+
+Local workstation measurements belong to `192.168.0.109`, which is different from the requested deployment server. They cannot establish capacity or readiness of `192.168.0.107`.
+
+The user-provided screenshot shows Windows, an RTX3070 and approximately32GiB RAM on the target machine. Initial SSH/RDP/WinRM/HTTPS and DCOM/SMB probes did not connect. The user subsequently supplied the existing Docker API `tcp://192.168.0.107:2375`; this endpoint works and is now the deployment transport. Its authentication/exposure settings were not changed.
+
+Target preflight at2026-09-09T04:32:56Z confirmed Docker Desktop/WSL2, engine27.3.1,16 guest CPUs and16665694208bytes (15.52GiB) guest memory. The official pinned CUDA probe identified an RTX3070, driver610.62,8192MiB VRAM with6156MiB free. Guest MemAvailable was approximately11.67GiB and Linux backing-filesystem free space approximately916.85GiB. These are Docker guest measurements, not Windows physical RAM/drive capacity. No BrowserSkills resources existed before deployment; existing containers from another project were preserved. Report: `runtime/remote-107-preflight.json`.
+
+At2026-09-09T04:52:47Z, the actual API/web, PostgreSQL and five worker containers were deployed on `.107`. External HTTPS liveness passed with an explicit private CA and normal chain/serverAuth/IP validation, without changing the Windows trust store. The ordinary `vitalii` operator was provisioned through the account CLI; its generated password remains in the protected deployment directory. Readiness reported database and all five workers UP, `manualReviewAvailable=true`, and inference DOWN. Actual container inspection confirmed separate worker networks/profile/token volumes, read-only worker roots, dropped capabilities, nonprivileged containers and the Chromium seccomp JSON; only `192.168.0.107:8443` was published. No remote host bind mounts were used. Evidence: `runtime/remote-107/71a2479ad7764a008143936e204f355c/deployment-result.json`.
+
+The requested Codex in-app browser navigation to `https://192.168.0.107:8443` was attempted, but returned `ERR_CERT_AUTHORITY_INVALID`. Its error page offered reload only. No UI interaction or embedded Chromium test on this installation has passed yet. The user was given the public-only `runtime/BrowserSkills-107-CA.cer` for manual trust setup; browser checks remain pending that step. Certificate SHA256: `9011E24EFB154923CF9030A833115D00DF5A9C7A8E0AAC8DDC6C181A4A3C5B90`.
+
+## Live-site observation
+
+The Chrome session exposed the Yandex Tasks demo catalogue. The image-classification project displayed its complete instruction in a modal iframe, with a separate `/instructions/{poolId}` link. Opening the unpaid training navigated to `/task/{poolId}/{taskSuiteId}` and embedded `https://iframe-tasks.yandex`.
+
+The embedded body contained only whitespace, including after one reload. The top-level Send/Skip/Exit buttons existed, but no question, image or answer controls were available for inspection. No answers were selected or submitted. The route's suite identifier must not be assumed to identify one individual task. A loaded form is still needed to verify task boundaries, controls and success acknowledgement.
+
+A second independent unpaid demo, search-query classification (pool `5221474`), exposed its complete four-category instruction with examples, but its task iframe again contained only whitespace. Console warnings reported access to index 0 of an empty MobX array; these warnings do not establish the root cause. No form selectors or submission identity could be verified in either demo. The second page was left open for user continuation.
+
+The user later opened pool6685530 (registration-on-a-platform task). Its Chrome screenshot still showed a central loading indicator and no task controls; the user requested the next check through BrowserSkills' own server browser. Production adapter profiles remain empty until a loaded compatible form is available. Audio-task templates have not been observed on the live site.
+
+## Actual model diagnostics
+
+The final fixed 100-case synthetic corpus completed with the production system prompt, request-local option aliases, disabled prompt/idle caches, max_tokens512 and the API's bounded FFmpeg mono16kPCM16 normalization. No retries or selection of favourable aliases were used. The report stores the actual aliases, corpus/evaluator/prompt hashes and resource samples for replay.
+
+| Category | Correct | Accuracy | p95 latency | Acceptance |
+|---|---:|---:|---:|---|
+| Text | 24/25 | 96% | 0.223s | Pass for this diagnostic set |
+| Image | 19/25 | 76% | 2.999s | Fail |
+| Speech | 25/25 | 100% | 12.376s | Pass for this diagnostic set |
+| Sound/prosody | 6/25 | 24% | 35.341s | Fail |
+
+The overall evaluator exited1 because image and sound/prosody accuracy did not meet90%. Peak inference-container memory was2814382080bytes (2.621GiB); whole-device GPU memory reached6879MiB across726 samples. This was the shared `.109` workstation with an RTX5080, not the target RTX3070. Speech used an English Windows SAPI voice; the set does not establish Russian-speech, natural-sound, music or live-Yandex quality.
+
+Controlled probes also showed that a correctly extracted custom classification rule can still cause the model to abstain. A short internal finding before the decision did not resolve the instruction/sound failures and was not added to production. Full instruction capture and preservation are verified; reliable model interpretation of every project rule is still an open acceptance condition.
+
+Local measured report: `runtime/model-evaluation-final-109.json`, SHA256 `00ea5f362412f3e34b53d0eb05c189ec8b172203f6082fd8c799b6c978f42784`. The earlier baseline is retained separately in `runtime/model-evaluation-baseline-109.json`; several request settings changed between these runs, so their difference is not attributed to one change alone. Model provenance is in `runtime/model-provenance.json`. The temporary GPU smoke container was stopped after measurement; its verified model volume remains available.
+
+Verified final API image: `sha256:e8166373404b260f7ae4c50d36b004cfcf7b813ff640b430dabd57306fee59f6`; browser image: `sha256:b8d458c3ef6a94d6cfd7e33b1cb945667bd02f0baf8e3789a1c5de5a37676234`; inference image: `sha256:d5aaca724e6214bd4cb45752dbe57fa2e6a9ce7ee63b595425cac66cf94bb2b4`. These are builds from the current worktree. The identical API and browser image IDs are now deployed on `.107`; inference deployment and release acceptance remain pending.
+
+The deployment-fixture checks exposed defects that the earlier process-level tests did not cover: unquoted inline Compose tmpfs entries became invalid mount targets; Chromium needed writable XDG directories on a read-only root; simultaneous display shutdown and duplicate Playwright/application signal handlers prevented clean profile flush. These were reproduced before their fixes. The production supervisor now keeps X alive until Chromium closes, the application owns TERM/INT, shutdown refuses new commands and awaits pending launch cleanup, and backup refuses an unclean/still-locked profile. No profile-lock deletion or permission relaxation was used to make the tests pass.
+
+## Remaining acceptance
+
+- A supported, loaded Yandex task template, with its complete instruction and verified one-task submission boundary.
+- Independently labelled accuracy/performance evaluation meeting all category gates. Generated diagnostic shapes/tones are not a substitute for representative speech, environmental sounds, music or prosody.
+- Complete inference deployment and interactive UI testing on `192.168.0.107`, actual model performance there, and restart after Windows sign-in. Docker API access, GPU/guest-memory preflight and API/web/PG/five-worker deployment are verified. Local five-profile backup/restore passed; target-host recovery and real Yandex session validity remain unverified.

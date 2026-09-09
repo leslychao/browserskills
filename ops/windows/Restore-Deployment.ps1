@@ -2,10 +2,15 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$BackupDirectory)
 . "$PSScriptRoot/Common.ps1"
-Assert-Administrator
+# This operates only on Docker resources and readable backup files, not host settings.
 Assert-Docker
 $backup = [IO.Path]::GetFullPath($BackupDirectory)
 $manifest = Get-Content -LiteralPath (Join-Path $backup backup.json) -Raw | ConvertFrom-Json -AsHashtable
+if (($manifest['schemaVersion'] -isnot [int] -and $manifest['schemaVersion'] -isnot [long]) -or $manifest['schemaVersion'] -ne 1 -or
+    $manifest['profilesStopped'] -isnot [bool] -or $manifest['profilesStopped'] -ne $true -or
+    $manifest['profilesVerifiedClean'] -isnot [bool] -or $manifest['profilesVerifiedClean'] -ne $true) {
+    throw 'Unsupported or unverified backup manifest: clean browser shutdown must have been verified before backup.'
+}
 $names = @('database.dump', 'profile-1.tar.gz', 'profile-2.tar.gz', 'profile-3.tar.gz', 'profile-4.tar.gz', 'profile-5.tar.gz', 'deployment.env')
 $names += @('postgres_password','db_password','api_cert','api_key','worker_1_token','worker_2_token','worker_3_token','worker_4_token','worker_5_token','ca_cert.pem','ca_private.key') | ForEach-Object { "secrets/$_" }
 foreach ($name in $names) {

@@ -4,8 +4,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'inference'))
+from recipe_lock import recipe_digest
 
 
 def module(name):
@@ -21,6 +25,37 @@ serving = module('serve')
 
 
 class InferenceToolsTest(unittest.TestCase):
+    def test_aliases_are_opaque_unique_and_exclude_original_ids(self):
+        aliases = evaluation.option_aliases([{'id': 'abcdefghij'}, {'id': 'klmnopqrst'}])
+        self.assertEqual(2, len(set(aliases)))
+        self.assertTrue(all(len(a) == 10 and a.isascii() and a.isalpha() and a.islower() for a in aliases))
+        self.assertFalse(set(aliases) & {'abcdefghij', 'klmnopqrst'})
+
+    def test_alias_response_maps_back_to_original_id(self):
+        case = {'instruction': 'Select blue.', 'question': 'blue', 'options': [{'id': 'original', 'label': 'blue'}]}
+        with mock.patch.object(evaluation, 'query', return_value=({'decision': 'ANSWER', 'optionId': 'abcdefghij'}, .1)):
+            answer, _ = evaluation.query_case('http://unused', case, Path('.'), ['abcdefghij'])
+        self.assertEqual({'decision': 'ANSWER', 'optionId': 'original'}, answer)
+        self.assertEqual('original', case['options'][0]['id'])
+
+    def test_unknown_alias_is_rejected_and_abstain_is_preserved(self):
+        case = {'instruction': 'i', 'question': 'q', 'options': [{'id': 'original', 'label': 'x'}]}
+        with mock.patch.object(evaluation, 'query', return_value=({'decision': 'ANSWER', 'optionId': 'unknown'}, .1)):
+            with self.assertRaises(ValueError):
+                evaluation.query_case('http://unused', case, Path('.'), ['abcdefghij'])
+        with mock.patch.object(evaluation, 'query', return_value=({'decision': 'ABSTAIN'}, .1)):
+            self.assertEqual({'decision': 'ABSTAIN'}, evaluation.query_case('http://unused', case, Path('.'), ['abcdefghij'])[0])
+
+    def test_recipe_identity_ignores_line_endings_but_not_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'recipe.json'
+            path.write_bytes(b'{\r\n  "version": 1\r\n}\r\n')
+            windows = recipe_digest(path)
+            path.write_bytes(b'{"version":1}\n')
+            self.assertEqual(windows, recipe_digest(path))
+            path.write_bytes(b'{"version":2}\n')
+            self.assertNotEqual(windows, recipe_digest(path))
+
     def test_checksum_of_actual_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'file'

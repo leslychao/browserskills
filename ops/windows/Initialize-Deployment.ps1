@@ -9,13 +9,18 @@ if (-not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -EQ $Ser
 $root = Get-ProjectRoot
 $secrets = Join-Path $root secrets
 Set-ProtectedDirectory $secrets
+if (Get-ChildItem -LiteralPath $secrets -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
+    throw 'Secrets cannot contain reparse points.'
+}
 foreach ($name in @('postgres_password', 'db_password', 'worker_1_token', 'worker_2_token', 'worker_3_token', 'worker_4_token', 'worker_5_token')) {
     $path = Join-Path $secrets $name
     if (-not (Test-Path -LiteralPath $path)) { Write-Utf8 $path ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()) }
 }
 $certPath = Join-Path $secrets api_cert
 $keyPath = Join-Path $secrets api_key
-if ((Test-Path -LiteralPath $certPath) -xor (Test-Path -LiteralPath $keyPath)) { throw 'Partial TLS setup: preserve existing files and repair before proceeding.' }
+$tlsFiles = @('api_cert', 'api_key', 'ca_cert.pem', 'ca_private.key')
+$presentTlsFiles = @($tlsFiles | Where-Object { Test-Path -LiteralPath (Join-Path $secrets $_) -PathType Leaf })
+if ($presentTlsFiles.Count -notin @(0, 4)) { throw 'Partial TLS setup: preserve all existing CA/server files and repair before proceeding.' }
 if (-not (Test-Path -LiteralPath $certPath)) {
     $caKey = [Security.Cryptography.RSA]::Create(3072)
     $serverKey = [Security.Cryptography.RSA]::Create(3072)
@@ -33,7 +38,7 @@ if (-not (Test-Path -LiteralPath $certPath)) {
 }
 $envFile = Join-Path $root '.env'
 if (Test-Path -LiteralPath $envFile) {
-    if ((Get-Content -LiteralPath $envFile -Raw) -notmatch [regex]::Escape("BROWSERSKILLS_BIND_IP=$ServerIp")) { throw 'Existing .env targets a different address; do not overwrite an established deployment.' }
+    if ((Get-Content -LiteralPath $envFile -Raw) -notmatch ('(?m)^' + [regex]::Escape("BROWSERSKILLS_BIND_IP=$ServerIp") + '\r?$')) { throw 'Existing .env targets a different address; do not overwrite an established deployment.' }
 } else {
     Write-Utf8 $envFile "BROWSERSKILLS_BIND_IP=$ServerIp`nBROWSERSKILLS_PUBLIC_ORIGIN=https://${ServerIp}:8443`nBROWSERSKILLS_RELEASE=0.1.0`n"
 }

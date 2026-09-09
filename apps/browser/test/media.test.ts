@@ -29,6 +29,8 @@ describe('bounded original media',()=>{
     const media=await store();await expect(media.put(Buffer.from('not audio'),'audio')).rejects.toHaveProperty('code');
     await expect(media.put(wave(61),'audio')).rejects.toMatchObject({code:'AUDIO_TOO_LONG'});
     await expect(media.put(Buffer.alloc(20*1024*1024+1),'audio')).rejects.toMatchObject({code:'MEDIA_TOO_LARGE'});
+    await expect(media.put(Buffer.from('#EXTM3U\nhttp://127.0.0.1/private'),'audio')).rejects.toMatchObject({code:'UNSUPPORTED_AUDIO'});
+    await expect(media.put(Buffer.from('ffconcat version 1.0\nfile /run/secrets/worker_token'),'audio')).rejects.toMatchObject({code:'UNSUPPORTED_AUDIO'});
   });
   it('allows bounded longer instruction audio but still enforces the task clip limit on a cached asset',async()=>{
     const media=await store();const original=wave(61);expect((await media.put(original,'audio',120_000)).durationMs).toBe(61_000);

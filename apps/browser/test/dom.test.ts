@@ -80,6 +80,11 @@ describe('complete instructions and click-time guards',()=>{
     document.querySelector('#instructions')!.innerHTML='<h2>Rules</h2><p>First<br>second</p><ul><li>Example A</li><li>Example B</li></ul><script>ignored()</script><style>body{}</style>';
     const blocks=instructionDom(['#instructions']);expect(blocks[0]).toEqual({type:'text',text:expect.stringContaining('First\nsecond')});expect(JSON.stringify(blocks)).toContain('- Example A');expect(JSON.stringify(blocks)).not.toContain('ignored');
   });
+  it('preserves numbered rule references and distinct table columns',()=>{
+    document.querySelector('#instructions')!.innerHTML='<ol start="3"><li>Rule three</li><li value="7">Rule seven</li><li>Rule eight</li></ol><table><tr><th>Object</th><th>Answer</th></tr><tr><td>Sky</td><td>Blue</td></tr></table><ol reversed><li>Second</li><li>First</li></ol>';
+    const rendered=instructionDom(['#instructions']).map(block=>block.type==='text'?block.text:'').join('\n');
+    expect(rendered).toContain('3. Rule three');expect(rendered).toContain('7. Rule seven');expect(rendered).toContain('8. Rule eight');expect(rendered).toContain('Sky\tBlue');expect(rendered).toContain('2. Second');expect(rendered).toContain('1. First');
+  });
   it.each(['iframe','video','canvas','object','embed'])('blocks unsupported instruction material %s',tag=>{
     document.querySelector('#instructions')!.innerHTML=`<${tag}></${tag}>`;expect(()=>instructionDom(['#instructions'])).toThrow('INSTRUCTIONS_UNSUPPORTED');
   });

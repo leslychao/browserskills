@@ -54,7 +54,11 @@ public class Materials {
     var current = runs.get(run);
     if (current == null || !current.media().containsKey(asset))
       throw new ApiException(404, "NOT_FOUND", "Resource not found.");
-    var metadata = SnapshotValidation.assets(current.snapshot()).stream().filter(a -> a.id().equals(asset)).findFirst().orElseThrow(() -> new ApiException(404,"NOT_FOUND","Resource not found."));
-    return new AssetBytes(metadata,current.media().get(asset));
+    var metadata =
+        SnapshotValidation.assets(current.snapshot()).stream()
+            .filter(a -> a.id().equals(asset))
+            .findFirst()
+            .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "Resource not found."));
+    return new AssetBytes(metadata, current.media().get(asset));
   }
 }

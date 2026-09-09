@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
+import { request } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,10 +25,33 @@ async function setup(mode:FixtureMode='normal'){
   const app=createWorkerServer(owner,token,(tcp.address() as import('node:net').AddressInfo).port);app.server.listen(0,'127.0.0.1');await once(app.server,'listening');cleanup.push(app.close);
   const url=`http://127.0.0.1:${(app.server.address() as import('node:net').AddressInfo).port}`;
   const command=async(command:Omit<WorkerCommand,'id'>&{id?:string})=>fetch(`${url}/internal/commands`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({id:randomUUID(),...command})});
-  return {owner,url,command,input,site};
+  return {owner,app,url,command,input,site};
 }
 
 describe('worker HTTP, generation and manual control',()=>{
+  it('closes admission before browser shutdown, rejects an unfinished OPEN body and closes only once',async()=>{
+    const {owner,app,url}=await setup();
+    let releaseClose!:()=>void;
+    const ownerClosing=new Promise<void>(resolve=>{releaseClose=resolve;});
+    const closeOwner=vi.spyOn(owner,'close').mockImplementation(()=>ownerClosing);
+    const dispatch=vi.spyOn(owner,'command');
+    const body=JSON.stringify({id:randomUUID(),type:'OPEN'});
+    const received=once(app.server,'request');
+    let responseResult!:Promise<{status:number|undefined;body:string}>;
+    const pending=request(`${url}/internal/commands`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'}});
+    responseResult=new Promise((resolve,reject)=>{pending.once('error',reject);pending.once('response',response=>{let body='';response.on('data',chunk=>{body+=String(chunk);});response.once('end',()=>resolve({status:response.statusCode,body}));});});
+    void responseResult.catch(()=>undefined);
+    pending.write(body.slice(0,5));await received;
+    const closing=app.close();
+    try{
+      expect(app.close()).toBe(closing);
+      expect(app.server.listening).toBe(false);
+      await expect(fetch(`${url}/internal/commands`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body,signal:AbortSignal.timeout(2000)})).rejects.toThrow();
+      pending.end(body.slice(5));
+      expect(await responseResult).toEqual({status:503,body:JSON.stringify({code:'WORKER_CLOSING',message:'WORKER_CLOSING'})});
+      expect(dispatch).not.toHaveBeenCalled();expect(closeOwner).toHaveBeenCalledTimes(1);
+    }finally{pending.destroy();releaseClose();await closing;}
+  });
   it('requires bearer for status, commands and original media',async()=>{
     const {url}=await setup();
     for(const path of ['/internal/status','/internal/media/'+randomUUID(),'/internal/commands'])expect((await fetch(url+path)).status).toBe(401);

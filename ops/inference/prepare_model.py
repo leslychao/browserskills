@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
+from recipe_lock import recipe_digest
 
 
 def digest(path):
@@ -60,7 +61,7 @@ def main():
     provenance_path = root / 'provenance.json'
     if provenance_path.exists():
         saved = json.loads(provenance_path.read_text())
-        if saved['recipeLockSha256'] != digest(Path(args.lock)):
+        if saved['recipeHashEncoding'] != 'canonical-json-v1' or saved['recipeLockSha256'] != recipe_digest(Path(args.lock)):
             raise RuntimeError('Models belong to another recipe. Use a new model volume for upgrades.')
         for name, checksum in saved['outputs'].items():
             if digest(root / name) != checksum:
@@ -93,7 +94,7 @@ def main():
             raise TimeoutError('Conversion budget exhausted. No serving manifest was created.')
         subprocess.run(command, check=True, timeout=remaining, cwd='/conversion')
     outputs = {name: digest(root / name) for name in ('language-Q4_K_M.gguf', 'mmproj-Q8_0.gguf')}
-    result = {'schemaVersion': 1, 'recipeLockSha256': digest(Path(args.lock)), 'source': lock['source'],
+    result = {'schemaVersion': 1, 'recipeHashEncoding': 'canonical-json-v1', 'recipeLockSha256': recipe_digest(Path(args.lock)), 'source': lock['source'],
               'model': {k: v for k, v in model.items() if k != 'files'}, 'recipe': lock['recipe'], 'outputs': outputs,
               'pythonPackages': Path('/conversion/python-packages.lock').read_text(), 'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
     temporary = provenance_path.with_suffix('.partial')

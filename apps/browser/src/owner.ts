@@ -16,6 +16,7 @@ export interface OwnerOptions {
 export class BrowserOwner extends EventEmitter {
   readonly media:MediaStore;
   private context:BrowserContext|null=null;
+  private opening:Promise<BrowserContext>|null=null;
   private adapter:FixedAdapter|null=null;
   private generation=randomUUID();
   private mode:BrowserStatus['mode']='CLOSED';
@@ -56,16 +57,24 @@ export class BrowserOwner extends EventEmitter {
       case 'OPEN':
         if(this.context)return this.status();
         const openingEpoch=this.epoch;
-        const openedContext=await chromium.launchPersistentContext(this.options.profileDir,{headless:this.options.headless??false,
+        const opening=this.opening=chromium.launchPersistentContext(this.options.profileDir,{headless:this.options.headless??false,
+          // main owns these signals. A second Playwright close would force-kill the profile mid-flush.
+          handleSIGTERM:false,handleSIGINT:false,
           ...(this.options.executablePath?{executablePath:this.options.executablePath}:{}),chromiumSandbox:true,
-          acceptDownloads:false,viewport:{width:1366,height:768},ignoreHTTPSErrors:false,args:['--disable-sync','--disable-background-networking']});
-        if(openingEpoch!==this.epoch){await openedContext.close();throw new WorkerError('STOPPED');}
-        this.context=openedContext;
-        this.context.setDefaultTimeout(5_000);this.context.setDefaultNavigationTimeout(30_000);
-        const page=this.context.pages()[0]??await this.context.newPage();
-        for(const extra of this.context.pages().slice(1))await extra.close();
-        this.context.on('page',extra=>{if(extra!==page)void extra.close().catch(()=>undefined);});
-        this.context.on('close',()=>{if(this.context!==openedContext)return;this.epoch++;this.generation=randomUUID();this.revoke();this.context=null;this.adapter?.cancel();this.adapter=null;this.mode='CLOSED';this.runId=null;this.expireSnapshots();this.tail=Promise.resolve();void this.media.clear();});
+          acceptDownloads:false,viewport:{width:1366,height:768},ignoreHTTPSErrors:false,args:['--disable-sync','--disable-background-networking']}).then(async openedContext=>{
+          // Closing must wait for this cleanup even if the context did not exist when it began.
+          if(openingEpoch!==this.epoch){await openedContext.close();throw new WorkerError('STOPPED');}
+          this.context=openedContext;return openedContext;
+        });
+        let openedContext:BrowserContext;
+        try{openedContext=await opening;}finally{if(this.opening===opening)this.opening=null;}
+        if(openingEpoch!==this.epoch)throw new WorkerError('STOPPED');
+        openedContext.setDefaultTimeout(5_000);openedContext.setDefaultNavigationTimeout(30_000);
+        const page=openedContext.pages()[0]??await openedContext.newPage();
+        for(const extra of openedContext.pages().slice(1))await extra.close();
+        if(openingEpoch!==this.epoch)throw new WorkerError('STOPPED');
+        openedContext.on('page',extra=>{if(extra!==page)void extra.close().catch(()=>undefined);});
+        openedContext.on('close',()=>{if(this.context!==openedContext)return;this.epoch++;this.generation=randomUUID();this.revoke();this.context=null;this.adapter?.cancel();this.adapter=null;this.mode='CLOSED';this.runId=null;this.expireSnapshots();this.tail=Promise.resolve();void this.media.clear();});
         page.on('dialog',dialog=>void dialog.dismiss().catch(()=>undefined));
         page.on('download',download=>void download.cancel().catch(()=>undefined));
         this.adapter=new FixedAdapter(page,this.media,this.options.profiles,{verificationTimeoutMs:this.options.verificationTimeoutMs});
@@ -96,8 +105,8 @@ export class BrowserOwner extends EventEmitter {
   async close():Promise<void>{
     this.epoch++;this.revoke();this.mode='CLOSED';this.runId=null;this.generation=randomUUID();
     this.expireSnapshots();
-    this.adapter?.cancel();this.adapter=null;const context=this.context;this.context=null;
-    const closing=(async()=>{await context?.close({reason:'Stopped by owner'}).catch(()=>undefined);await this.media.clear();})();
+    this.adapter?.cancel();this.adapter=null;const context=this.context;this.context=null;const opening=this.opening;
+    const closing=(async()=>{await context?.close({reason:'Stopped by owner'}).catch(()=>undefined);await opening?.catch(()=>undefined);await this.media.clear();})();
     this.tail=closing;await closing;
   }
 }

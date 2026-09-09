@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from recipe_lock import recipe_digest
 
 
 def verify(root, recipe_path=Path('/app/model.lock.json')):
@@ -12,7 +13,7 @@ def verify(root, recipe_path=Path('/app/model.lock.json')):
         raise ValueError('Unexpected model revision.')
     if manifest['source']['revision'] != '5266f24da75dc449bd56cbed7addb9c8e4a6a73e':
         raise ValueError('Unexpected converter revision.')
-    if manifest['recipeLockSha256'] != hashlib.sha256(recipe_path.read_bytes()).hexdigest():
+    if manifest['recipeHashEncoding'] != 'canonical-json-v1' or manifest['recipeLockSha256'] != recipe_digest(recipe_path):
         raise ValueError('Model volume belongs to a different pinned recipe.')
     for name in ('language-Q4_K_M.gguf', 'mmproj-Q8_0.gguf'):
         h = hashlib.sha256()
@@ -33,4 +34,5 @@ if __name__ == '__main__':
         '--mmproj', '/models/mmproj-Q8_0.gguf', '--alias', 'Qwen2.5-Omni-7B', '--host', '0.0.0.0', '--port', '8080',
         '--ctx-size', '8192', '--parallel', '1', '--n-gpu-layers', '99', '--no-mmproj-offload',
         '--threads', '4', '--threads-batch', '4', '--batch-size', '512', '--ubatch-size', '128',
+        '--cache-ram', '0', '--no-cache-idle-slots', '--no-cache-prompt',
         '--no-context-shift', '--no-webui', '--no-slots', '--log-disable', '--jinja', '--timeout', '120'])

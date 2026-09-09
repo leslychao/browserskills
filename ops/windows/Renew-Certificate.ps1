@@ -6,6 +6,15 @@ Assert-Administrator
 $root = Get-ProjectRoot
 $secrets = Join-Path $root secrets
 $ip = [Net.IPAddress]::Parse($ServerIp)
+if ($ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+    -not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -EQ $ServerIp)) {
+    throw 'Renew TLS locally for the specific IPv4 address assigned to this server.'
+}
+if ((Get-Content -LiteralPath (Join-Path $root '.env') -Raw) -notmatch
+    ('(?m)^' + [regex]::Escape("BROWSERSKILLS_PUBLIC_ORIGIN=https://${ServerIp}:8443") + '\r?$')) {
+    throw 'Certificate IP must match the configured public origin; do not break an existing deployment.'
+}
+Set-ProtectedDirectory $secrets
 $ca = [Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPemFile((Join-Path $secrets ca_cert.pem), (Join-Path $secrets ca_private.key))
 $key = [Security.Cryptography.RSA]::Create()
 try {
